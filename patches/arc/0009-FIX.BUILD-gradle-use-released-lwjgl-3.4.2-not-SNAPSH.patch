@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: k8smical-sudo <k8smical-sudo@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 04:34:10 +0000
+Subject: [PATCH] FIX.BUILD(gradle): use released lwjgl 3.4.2 not SNAPSHOT
+
+---
+ build.gradle | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/build.gradle b/build.gradle
+index 8196013ae36ae234c88c54d8410e2a3fbc245747..a1b6e17d02f5ff715394a26c814cae0e59f8c3a6 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -21,7 +21,7 @@ ext{
+ 
+ versions.robovm = "2.3.26"
+ versions.junit = "4.11"
+-versions.lwjgl = "3.4.2-SNAPSHOT"
++versions.lwjgl = "3.4.2"
+ versions.soloud = "2026.09.04"
+ 
+ libraries.robovm = [
