@@ -156,5 +156,9 @@ git_am "../patches/picked/*"
 commit_marker "#END-PICKED#"
 git_am "../patches/client/*"
 
+#OpenWorld: parches del mundo abierto, aparte de los de MindustryX (así genPatches no los mezcla con patches/client)
+commit_marker "#END-CLIENT#"
+git_am "../patches/openworld/*"
+
 echo "Now at $(git rev-parse HEAD)" && cd ..
 echo -e "${GREEN}====== All Done ======${NC}"

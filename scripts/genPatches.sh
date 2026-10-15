@@ -17,5 +17,14 @@ echo "BASE=$base,PICKED=$picked"
 rm -rf ../patches/picked/*
 git format-patch --full-index --no-signature --zero-commit -N --ignore-blank-lines -o ../patches/picked "$base...$picked^"
 rm -rf ../patches/client/*
-git format-patch --full-index --no-signature --zero-commit -N --ignore-blank-lines -o ../patches/client "$picked..."
+#OpenWorld: si existe el marcador #END-CLIENT#, lo posterior son los parches del mundo abierto (patches/openworld)
+client_end=$(git log --grep "#END-CLIENT#" --format=reference | awk '{print $1}')
+if [ -n "$client_end" ]; then
+    git format-patch --full-index --no-signature --zero-commit -N --ignore-blank-lines -o ../patches/client "$picked...$client_end^"
+    rm -rf ../patches/openworld/*
+    mkdir -p ../patches/openworld
+    git format-patch --full-index --no-signature --zero-commit -N --ignore-blank-lines -o ../patches/openworld "$client_end..."
+else
+    git format-patch --full-index --no-signature --zero-commit -N --ignore-blank-lines -o ../patches/client "$picked..."
+fi
 cd .. && git add patches
