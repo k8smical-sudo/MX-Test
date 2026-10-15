@@ -1,0 +1,247 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenWorld <openworld@example.com>
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Subject: [PATCH] OW(Fog): FogControl en anillo, eventos con signo y bits por
+ chunk
+
+---
+ core/src/mindustry/game/FogControl.java | 67 ++++++++++++++++++++++--
+ core/src/mindustry/world/Tiles.java     | 69 +++++++++++++++++++++++++
+ 2 files changed, 132 insertions(+), 4 deletions(-)
+
+diff --git a/core/src/mindustry/game/FogControl.java b/core/src/mindustry/game/FogControl.java
+index f5a383a4636a48408685407917775b64ba07bc55..b92212c1a9c91d0c64115ebbaccce285f6d618fc 100644
+--- a/core/src/mindustry/game/FogControl.java
++++ b/core/src/mindustry/game/FogControl.java
+@@ -20,6 +20,8 @@ import static mindustry.Vars.*;
+ 
+ public final class FogControl implements CustomChunk{
+     private static volatile int ww, wh;
++    /** Mundo en anillo: los bits se indexan con Tiles.index (hueco del anillo) y solo cuentan las casillas con su chunk cargado. */
++    private static volatile boolean ring;
+     private static final int dynamicUpdateInterval = 1000 / 25; //25 FPS
+     private static final Object notifyStatic = new Object(), notifyDynamic = new Object();
+ 
+@@ -50,6 +52,7 @@ public final class FogControl implements CustomChunk{
+             justLoaded = true;
+             ww = world.width();
+             wh = world.height();
++            ring = world.isRing();
+ 
+             //all old buildings have static light scheduled around them
+             if(state.rules.fog && state.rules.staticFog){
+@@ -61,6 +64,19 @@ public final class FogControl implements CustomChunk{
+             }
+         });
+ 
++        //mundos en anillo: el hueco de un chunk que se va no debe dejar niebla "explorada" ni "visible" al siguiente que lo ocupe.
++        //El mod guarda antes lo explorado con takeStaticChunk(); esto es la red de seguridad.
++        Events.on(ChunkUnloadEvent.class, e -> {
++            var all = fog;
++            if(all == null) return;
++            for(var d : all){
++                if(d == null) continue;
++                world.tiles.clearChunkBits(d.staticData, e.cx, e.cy);
++                world.tiles.clearChunkBits(d.read, e.cx, e.cy);
++                world.tiles.clearChunkBits(d.write, e.cx, e.cy);
++            }
++        });
++
+         Events.on(TileChangeEvent.class, event -> {
+             if(state.rules.fog && event.tile.build != null && event.tile.isCenter() && !event.tile.build.team.isOnlyAI() && event.tile.block().flags.contains(BlockFlag.hasFogRadius)){
+                 var data = data(event.tile.team());
+@@ -106,6 +122,7 @@ public final class FogControl implements CustomChunk{
+ 
+         var data = getDiscovered(team);
+         if(data == null) return false;
++        if(ring) return world.tiles.in(x, y) && data.get(world.tiles.index(x, y));
+         if(x < 0 || y < 0 || x >= ww || y >= wh) return false;
+         return data.get(x + y * ww);
+     }
+@@ -119,6 +136,8 @@ public final class FogControl implements CustomChunk{
+ 
+         var data = data(team);
+         if(data == null) return false;
++        //en anillo no hay borde al que acotar: una casilla sin chunk cargado no es visible
++        if(ring) return world.tiles.in(x, y) && data.read.get(world.tiles.index(x, y));
+         return data.read.get(Mathf.clamp(x, 0, ww - 1) + Mathf.clamp(y, 0, wh - 1) * ww);
+     }
+ 
+@@ -126,6 +145,27 @@ public final class FogControl implements CustomChunk{
+         fog = null;
+     }
+ 
++    /**
++     * Mundos en anillo. Copia a {@code out} (16 longs, formato de {@link mindustry.world.Tiles#readChunkBits}) lo que el equipo
++     * tiene explorado en el chunk cargado (cx, cy) y lo borra del hueco. Llamar ANTES de {@code world.unloadChunk}, para guardarlo.
++     */
++    public void takeStaticChunk(Team team, int cx, int cy, long[] out){
++        var data = data(team);
++        if(data == null){
++            java.util.Arrays.fill(out, 0, 16, 0L);
++            return;
++        }
++        world.tiles.readChunkBits(data.staticData, cx, cy, out);
++        world.tiles.clearChunkBits(data.staticData, cx, cy);
++    }
++
++    /** Mundos en anillo. Devuelve lo explorado que se guardó con {@link #takeStaticChunk}. Llamar DESPUÉS de publicar el chunk. */
++    public void putStaticChunk(Team team, int cx, int cy, long[] in){
++        if(fog == null) fog = new FogData[256];
++        if(fog[team.id] == null) fog[team.id] = new FogData();
++        world.tiles.writeChunkBits(fog[team.id].staticData, cx, cy, in);
++    }
++
+     @Nullable FogData data(Team team){
+         return fog == null || fog[team.id] == null ? null : fog[team.id];
+     }
+@@ -255,7 +295,7 @@ public final class FogControl implements CustomChunk{
+                 synchronized(staticEvents){
+                     //TODO slow?
+                     for(var unit : team.units){
+-                        int tx = unit.tileX(), ty = unit.tileY(), pos = tx + ty * ww;
++                        int tx = unit.tileX(), ty = unit.tileY(), pos = ring ? ((tx << 16) | (ty & 0xFFFF)) : tx + ty * ww;
+                         if(unit.type.fogRadius <= 0f) continue;
+                         long event = FogEvent.get(tx, ty, (int)unit.type.fogRadius, team.team.id);
+ 
+@@ -351,7 +391,7 @@ public final class FogControl implements CustomChunk{
+             int size = staticEvents.size;
+             for(int i = 0; i < size; i++){
+                 long event = staticEvents.items[i];
+-                int x = FogEvent.x(event), y = FogEvent.y(event), rad = FogEvent.radius(event), team = FogEvent.team(event);
++                int x = eventX(event), y = eventY(event), rad = FogEvent.radius(event), team = FogEvent.team(event);
+                 var data = fog[team];
+                 if(data != null){
+                     circle(data.staticData, x, y, rad);
+@@ -404,7 +444,7 @@ public final class FogControl implements CustomChunk{
+             //draw step
+             for(int i = 0; i < size; i++){
+                 long event = dynamicEvents.items[i];
+-                int x = FogEvent.x(event), y = FogEvent.y(event), rad = FogEvent.radius(event), team = FogEvent.team(event);
++                int x = eventX(event), y = eventY(event), rad = FogEvent.radius(event), team = FogEvent.team(event);
+ 
+                 if(rad <= 0) continue;
+ 
+@@ -510,7 +550,8 @@ public final class FogControl implements CustomChunk{
+ 
+     @Override
+     public boolean shouldWrite(){
+-        return state.rules.fog && state.rules.staticFog && fog != null;
++        //un mundo en anillo guarda lo explorado por chunk (takeStaticChunk), no con el guardado nativo de tamaño fijo
++        return state.rules.fog && state.rules.staticFog && fog != null && !ring;
+     }
+ 
+     static void circle(Bits arr, int x, int y, int radius){
+@@ -538,7 +579,25 @@ public final class FogControl implements CustomChunk{
+         }
+     }
+ 
++    /**
++     * FogEvent guarda x e y en 16 bits SIN signo (el getter del struct enmascara): en un mundo en anillo las coordenadas virtuales
++     * pueden ser negativas, así que se reinterpretan como short. Sin esto un evento en x = -5 se leería como 65531 y se descartaría.
++     */
++    static int eventX(long e){
++        int v = FogEvent.x(e);
++        return ring ? (short)v : v;
++    }
++
++    static int eventY(long e){
++        int v = FogEvent.y(e);
++        return ring ? (short)v : v;
++    }
++
+     static void hline(Bits arr, int x1, int x2, int y){
++        if(ring){
++            world.tiles.setBitsRow(arr, x1, x2, y);
++            return;
++        }
+         if(y < 0 || y >= wh) return;
+         int tmp;
+ 
+diff --git a/core/src/mindustry/world/Tiles.java b/core/src/mindustry/world/Tiles.java
+index 6fab5c8f463af1588d77b5c14282043285a006e8..1422b63863774eefbfde6390b1f12dd83581fb61 100644
+--- a/core/src/mindustry/world/Tiles.java
++++ b/core/src/mindustry/world/Tiles.java
+@@ -3,6 +3,7 @@ package mindustry.world;
+ import arc.func.*;
+ import arc.math.*;
+ import arc.math.geom.*;
++import arc.struct.Bits;
+ import arc.util.*;
+ import mindustry.gen.*;
+ 
+@@ -246,6 +247,74 @@ public class Tiles implements Iterable<Tile>{
+         return (x < 0 || y < 0 || x >= width || y >= height) ? -1 : x + y * width;
+     }
+ 
++    // ---------------------------------------------------------------- mapas de bits por casilla (niebla, etc.), indexados con index()
++
++    /**
++     * Pone a 1 en {@code arr} los bits de las casillas de la fila virtual {@code y}, entre x1 y x2 (inclusive, en cualquier orden),
++     * SOLO de las que tienen su chunk cargado: en un anillo un hueco sin chunk podría ser el de otro chunk (alias) y no se debe tocar.
++     * Equivale a {@code arr.set(y * width + x1, y * width + x2 + 1)} de un mapa normal, pero sin salirse del chunk ni de la costura.
++     */
++    public void setBitsRow(Bits arr, int x1, int x2, int y){
++        if(!ring) throw new UnsupportedOperationException("setBitsRow is only for ring mode");
++        if(x1 > x2){
++            int tmp = x1;
++            x1 = x2;
++            x2 = tmp;
++        }
++        if(y < minCoord || y > maxCoord) return;
++        if(x1 < minCoord) x1 = minCoord;
++        if(x2 > maxCoord) x2 = maxCoord;
++        if(x1 > x2) return;
++        int cy = y >> chunkBits, base = (y & mask) << bits;
++        for(int cx = x1 >> chunkBits, last = x2 >> chunkBits; cx <= last; cx++){
++            if(owner[slotOf(cx, cy)] != packChunk(cx, cy)) continue;
++            int a = Math.max(x1, cx << chunkBits), b = Math.min(x2, (cx << chunkBits) + chunkSize - 1);
++            arr.set(base | (a & mask), (base | (b & mask)) + 1);   //dentro de un chunk las casillas de una fila son contiguas, sin vuelta
++        }
++    }
++
++    /** Copia los bits del chunk cargado (cx, cy) a {@code out} (16 longs): el bit ly*32+lx del chunk es el bit (ly*32+lx)&63 de out[(ly*32+lx)>>6]. Chunk no cargado: ceros. */
++    public void readChunkBits(Bits arr, int cx, int cy, long[] out){
++        if(!ring) throw new UnsupportedOperationException("readChunkBits is only for ring mode");
++        Arrays.fill(out, 0, 16, 0L);
++        if(!chunkLoaded(cx, cy)) return;
++        int x0 = cx << chunkBits, y0 = cy << chunkBits, col = x0 & mask;
++        for(int ly = 0; ly < chunkSize; ly++){
++            int row = (((y0 + ly) & mask) << bits) | col;
++            for(int lx = 0; lx < chunkSize; lx++){
++                if(arr.get(row + lx)){
++                    int k = (ly << chunkBits) + lx;
++                    out[k >> 6] |= 1L << (k & 63);
++                }
++            }
++        }
++    }
++
++    /** Suma (OR) a {@code arr} los bits de {@code in} (formato de {@link #readChunkBits}) en el chunk cargado (cx, cy). No borra los que ya estuvieran puestos. */
++    public void writeChunkBits(Bits arr, int cx, int cy, long[] in){
++        if(!ring) throw new UnsupportedOperationException("writeChunkBits is only for ring mode");
++        if(!chunkLoaded(cx, cy)) return;
++        int x0 = cx << chunkBits, y0 = cy << chunkBits, col = x0 & mask;
++        for(int ly = 0; ly < chunkSize; ly++){
++            int row = (((y0 + ly) & mask) << bits) | col;
++            for(int lx = 0; lx < chunkSize; lx++){
++                int k = (ly << chunkBits) + lx;
++                if((in[k >> 6] & (1L << (k & 63))) != 0) arr.set(row + lx);
++            }
++        }
++    }
++
++    /** Pone a 0 en {@code arr} los bits del chunk cargado (cx, cy). Si el chunk no está cargado no hace nada (su hueco puede ser de otro). */
++    public void clearChunkBits(Bits arr, int cx, int cy){
++        if(!ring) throw new UnsupportedOperationException("clearChunkBits is only for ring mode");
++        if(!chunkLoaded(cx, cy)) return;
++        int x0 = cx << chunkBits, y0 = cy << chunkBits, col = x0 & mask;
++        for(int ly = 0; ly < chunkSize; ly++){
++            int row = (((y0 + ly) & mask) << bits) | col;
++            for(int lx = 0; lx < chunkSize; lx++) arr.clear(row + lx);
++        }
++    }
++
+     // ---------------------------------------------------------------- estados temporales y entidades (por índice)
+ 
+     public long getTmpFloorState(int pos){

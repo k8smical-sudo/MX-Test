@@ -1,0 +1,335 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenWorld <openworld@example.com>
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Subject: [PATCH] OW(Tiles): modo anillo con coordenadas virtuales y
+ Tile.array() por indice
+
+---
+ core/src/mindustry/world/Tile.java  |   4 +-
+ core/src/mindustry/world/Tiles.java | 208 ++++++++++++++++++++++++++--
+ 2 files changed, 197 insertions(+), 15 deletions(-)
+
+diff --git a/core/src/mindustry/world/Tile.java b/core/src/mindustry/world/Tile.java
+index 2454d2a96075adb3a35d57a8f8769ed0792444b8..aeb317458aaa3664b61e6d8ea95b7d5f70ad421e 100644
+--- a/core/src/mindustry/world/Tile.java
++++ b/core/src/mindustry/world/Tile.java
+@@ -74,9 +74,9 @@ public class Tile implements Position, QuadTreeObject, Displayable{
+         return Point2.pack(x, y);
+     }
+ 
+-    /** @return this tile's position, packed to the world width - for use in width*height arrays. */
++    /** @return this tile's index for use in width*height arrays (see {@link Tiles#index}; in ring mode it is the slot of the ring, not x + y*width). */
+     public int array(){
+-        return x + y * world.tiles.width;
++        return world.tiles.index(x, y);
+     }
+ 
+     public byte relativeTo(Tile tile){
+diff --git a/core/src/mindustry/world/Tiles.java b/core/src/mindustry/world/Tiles.java
+index 77b8e3f7269bfdaf8e159a546a02883f86677dd3..f5dd7fb925be6ea110f8fd05284371efcad83a77 100644
+--- a/core/src/mindustry/world/Tiles.java
++++ b/core/src/mindustry/world/Tiles.java
+@@ -8,9 +8,33 @@ import mindustry.gen.*;
+ 
+ import java.util.*;
+ 
+-/** A tile container. */
++/**
++ * A tile container. Tiene dos modos:
++ * <ul>
++ *   <li><b>Denso</b> (clásico, el de siempre): un array width*height; las coordenadas son 0..width-1 / 0..height-1.</li>
++ *   <li><b>Anillo</b> (mundo abierto, {@link #ring(int)}): un búfer circular de {@code width x height} casillas (potencia de 2) que
++ *   NUNCA se reubica. Las coordenadas son <i>virtuales</i> (rango de un {@code short}: 65 536 x 65 536 casillas) y cada casilla vive en
++ *   el hueco {@code (x & mask, y & mask)}. Como cada chunk de 32x32 tiene un único hueco, cargar o descargar un chunk es sobrescribir
++ *   1024 casillas: no se copia nada más y la memoria es constante. Una casilla solo "existe" mientras su chunk esté reclamado
++ *   ({@link #claimChunk}); fuera de eso {@link #get} devuelve null, igual que antes devolvía null fuera del mapa.</li>
++ * </ul>
++ * En modo anillo {@code width}/{@code height} son el lado del anillo: sirven, como siempre, para dimensionar arrays por casilla
++ * indexados con {@link #index}. Ya NO son los límites del mundo (para eso, {@link #in}).
++ */
+ public class Tiles implements Iterable<Tile>{
++    public static final int chunkBits = 5, chunkSize = 1 << chunkBits;
++    /** Rango de coordenadas virtuales válidas en modo anillo (el de un short, que es lo que guarda Tile.x/y y Point2.pack). */
++    public static final int minCoord = Short.MIN_VALUE, maxCoord = Short.MAX_VALUE;
++    private static final int noOwner = Integer.MIN_VALUE;
++
+     public final int width, height;
++    /** true = búfer circular (mundo abierto). */
++    public final boolean ring;
++
++    //solo modo anillo
++    private final int bits, mask, slotBits, slotMask;
++    private final int[] owner;
++    private int loadedChunks;
+ 
+     final Tile[] array;
+     final Puddle[] puddles;
+@@ -18,14 +42,142 @@ public class Tiles implements Iterable<Tile>{
+ 
+     @Nullable long[] tmpFloorState, tmpBlockState;
+ 
++    /** Modo denso, el clásico. */
+     public Tiles(int width, int height){
+-        this.array = new Tile[width * height];
++        this(width, height, false, 0);
++    }
++
++    /**
++     * Modo anillo.
++     * @param chunksPerSideLog2 log2 de los chunks por lado del anillo: 4 = 16 chunks = 512 casillas (262 144), 5 = 1024 casillas.
++     * El anillo debe ser más grande que el diámetro de lo que se mantiene cargado (con margen).
++     */
++    public static Tiles ring(int chunksPerSideLog2){
++        if(chunksPerSideLog2 < 1 || chunksPerSideLog2 > 6) throw new IllegalArgumentException("chunksPerSideLog2 must be in [1, 6]");
++        int side = 1 << (chunksPerSideLog2 + chunkBits);
++        return new Tiles(side, side, true, chunksPerSideLog2 + chunkBits);
++    }
++
++    private Tiles(int width, int height, boolean ring, int bits){
+         this.width = width;
+         this.height = height;
++        this.ring = ring;
++        this.bits = bits;
++        this.mask = ring ? (1 << bits) - 1 : 0;
++        this.slotBits = ring ? bits - chunkBits : 0;
++        this.slotMask = ring ? (1 << slotBits) - 1 : 0;
++        this.array = new Tile[width * height];
+         this.puddles = new Puddle[width * height];
+         this.fires = new Fire[width * height];
++        if(ring){
++            this.owner = new int[1 << (2 * slotBits)];
++            Arrays.fill(owner, noOwner);
++        }else{
++            this.owner = null;
++        }
++    }
++
++    // ---------------------------------------------------------------- modo anillo: chunks
++
++    private static int packChunk(int cx, int cy){
++        return (cx << 16) | (cy & 0xFFFF);
+     }
+ 
++    private int slotOf(int cx, int cy){
++        return (cx & slotMask) | ((cy & slotMask) << slotBits);
++    }
++
++    private static boolean outOfRange(int x, int y){
++        return ((x - minCoord) | (y - minCoord)) >>> 16 != 0;
++    }
++
++    /** @return whether the chunk (chunk coordinates, i.e. tile >> 5) currently owns its slot. */
++    public boolean chunkLoaded(int cx, int cy){
++        if(!ring) return cx >= 0 && cy >= 0 && (cx << chunkBits) < width && (cy << chunkBits) < height;
++        return !outOfRange(cx << chunkBits, cy << chunkBits) && owner[slotOf(cx, cy)] == packChunk(cx, cy);
++    }
++
++    /** @return whether the slot where chunk (cx, cy) would live is free. Only ring mode. */
++    public boolean chunkSlotFree(int cx, int cy){
++        return owner[slotOf(cx, cy)] == noOwner;
++    }
++
++    /** @return whether the slot where chunk (cx, cy) would live is held by a DIFFERENT chunk (which must be released first). */
++    public boolean chunkSlotBusy(int cx, int cy){
++        int o = owner[slotOf(cx, cy)];
++        return o != noOwner && o != packChunk(cx, cy);
++    }
++
++    public int loadedChunkCount(){
++        return loadedChunks;
++    }
++
++    /**
++     * Reclama el hueco del chunk (cx, cy) y lo llena de casillas de aire con sus coordenadas virtuales. NO dispara eventos
++     * (el que llama escribe el terreno y avisa a los subsistemas una sola vez por chunk). Si el hueco lo tiene OTRO chunk lanza
++     * IllegalStateException: quien llama debe descargarlo (y guardarlo) antes con {@link #releaseChunk}.
++     */
++    public void claimChunk(int cx, int cy){
++        if(!ring) throw new UnsupportedOperationException("claimChunk is only for ring mode");
++        int x0 = cx << chunkBits, y0 = cy << chunkBits;
++        if(outOfRange(x0, y0) || outOfRange(x0 + chunkSize - 1, y0 + chunkSize - 1)) throw new IllegalArgumentException("chunk " + cx + ", " + cy + " out of world range");
++        int s = slotOf(cx, cy), p = packChunk(cx, cy);
++        if(owner[s] == p) return;
++        if(owner[s] != noOwner) throw new IllegalStateException("slot of chunk " + cx + ", " + cy + " is held by another chunk; release it first");
++        owner[s] = p;
++        loadedChunks++;
++        for(int ly = 0; ly < chunkSize; ly++){
++            int row = ((y0 + ly) & mask) << bits;
++            for(int lx = 0; lx < chunkSize; lx++){
++                array[row | ((x0 + lx) & mask)] = new Tile(x0 + lx, y0 + ly);
++            }
++        }
++    }
++
++    /** Suelta el chunk: sus casillas dejan de existir (get devuelve null) y el hueco queda libre. No hace nada si no estaba cargado. */
++    public void releaseChunk(int cx, int cy){
++        if(!ring) throw new UnsupportedOperationException("releaseChunk is only for ring mode");
++        if(!chunkLoaded(cx, cy)) return;
++        int s = slotOf(cx, cy);
++        int x0 = cx << chunkBits, y0 = cy << chunkBits;
++        for(int ly = 0; ly < chunkSize; ly++){
++            int row = ((y0 + ly) & mask) << bits;
++            for(int lx = 0; lx < chunkSize; lx++){
++                int i = row | ((x0 + lx) & mask);
++                array[i] = null;
++                puddles[i] = null;
++                fires[i] = null;
++                if(tmpFloorState != null) tmpFloorState[i] = 0;
++                if(tmpBlockState != null) tmpBlockState[i] = 0;
++            }
++        }
++        owner[s] = noOwner;
++        loadedChunks--;
++    }
++
++    /** Llama a cons(cx, cy) por cada chunk cargado (coordenadas de chunk). Solo modo anillo. */
++    public void eachLoadedChunk(Intc2 cons){
++        if(!ring) return;
++        for(int s = 0; s < owner.length; s++){
++            int o = owner[s];
++            if(o != noOwner) cons.get(o >> 16, (short)(o & 0xFFFF));
++        }
++    }
++
++    // ---------------------------------------------------------------- índice por casilla
++
++    /**
++     * Índice de la casilla (x, y) para arrays width*height propios (flowfields, niebla, etc.). En modo denso es x + y*width;
++     * en anillo es (x & mask) + (y & mask)*width, válido para cualquier coordenada virtual. Dos casillas VIVAS nunca comparten
++     * índice; un índice sí lo comparten con la del chunk que ocupó antes ese hueco, así que al cargar un chunk hay que reiniciar
++     * sus entradas en esos arrays.
++     */
++    public int index(int x, int y){
++        return ring ? ((x & mask) | ((y & mask) << bits)) : x + y * width;
++    }
++
++    // ---------------------------------------------------------------- estados temporales y entidades (por índice)
++
+     public long getTmpFloorState(int pos){
+         return tmpFloorState == null ? 0 : tmpFloorState[pos];
+     }
+@@ -60,7 +212,16 @@ public class Tiles implements Iterable<Tile>{
+         fires[pos] = f;
+     }
+ 
++    // ---------------------------------------------------------------- acceso
++
++    /** Calls cons for every tile coordinate. Ring mode: only the tiles of loaded chunks. */
+     public void each(Intc2 cons){
++        if(ring){
++            for(Tile t : array){
++                if(t != null) cons.get(t.x, t.y);
++            }
++            return;
++        }
+         for(int x = 0; x < width; x++){
+             for(int y = 0; y < height; y++){
+                 cons.get(x, y);
+@@ -68,16 +229,17 @@ public class Tiles implements Iterable<Tile>{
+         }
+     }
+ 
+-    /** fills this tile set with empty air tiles. */
++    /** fills this tile set with empty air tiles. Ring mode: no-op (the chunks are claimed on demand). */
+     public void fill(){
++        if(ring) return;
+         for(int i = 0; i < array.length; i++){
+             array[i] = new Tile(i % width, i / width);
+         }
+     }
+ 
+-    /** set a tile at a position; does not range-check. use with caution. */
++    /** set a tile at a position; does not range-check. use with caution. Ring mode: its chunk must be claimed. */
+     public void set(int x, int y, Tile tile){
+-        array[y*width + x] = tile;
++        array[index(x, y)] = tile;
+     }
+ 
+     /** set a tile at a raw array position; used for fast iteration / 1-D for-loops */
+@@ -85,31 +247,43 @@ public class Tiles implements Iterable<Tile>{
+         array[i] = tile;
+     }
+ 
+-    /** @return whether these coordinates are in bounds */
++    /** @return whether these coordinates are in bounds (ring mode: whether their chunk is loaded) */
+     public boolean in(int x, int y){
++        if(ring){
++            return !outOfRange(x, y) && owner[slotOf(x >> chunkBits, y >> chunkBits)] == packChunk(x >> chunkBits, y >> chunkBits);
++        }
+         return x >= 0 && x < width && y >= 0 && y < height;
+     }
+ 
+-    /** @return a tile at coordinates, or null if out of bounds */
++    /** @return a tile at coordinates, or null if out of bounds (ring mode: or if its chunk is not loaded) */
+     @Nullable
+     public Tile get(int x, int y){
++        if(ring){
++            if(outOfRange(x, y)) return null;
++            int cx = x >> chunkBits, cy = y >> chunkBits;
++            return owner[(cx & slotMask) | ((cy & slotMask) << slotBits)] == packChunk(cx, cy) ? array[(x & mask) | ((y & mask) << bits)] : null;
++        }
+         return (x < 0 || x >= width || y < 0 || y >= height) ? null : array[y*width + x];
+     }
+ 
+     /** @return a tile at coordinates; throws an exception if out of bounds */
+     public Tile getn(int x, int y){
+-        if(x < 0 || x >= width || y < 0 || y >= height) throw new IllegalArgumentException(x + ", " + y + " out of bounds: width=" + width + ", height=" + height);
+-        return array[y*width + x];
++        Tile t = get(x, y);
++        if(t == null) throw new IllegalArgumentException(x + ", " + y + " out of bounds: width=" + width + ", height=" + height + (ring ? " (ring: chunk not loaded)" : ""));
++        return t;
+     }
+ 
+-    /** @return a tile at coordinates, clamped. */
++    /** @return a tile at coordinates, clamped. Ring mode: there is no edge to clamp to, so this returns null if the chunk is not loaded. */
++    @Nullable
+     public Tile getc(int x, int y){
++        if(ring) return get(x, y);
+         x = Mathf.clamp(x, 0, width - 1);
+         y = Mathf.clamp(y, 0, height - 1);
+         return array[y*width + x];
+     }
+ 
+-    /** @return a tile at an iteration index [0, width * height] */
++    /** @return a tile at an iteration index [0, width * height]. Ring mode: null if that slot is empty. */
++    @Nullable
+     public Tile geti(int idx){
+         return array[idx];
+     }
+@@ -121,7 +295,7 @@ public class Tiles implements Iterable<Tile>{
+ 
+     public void eachTile(Cons<Tile> cons){
+         for(Tile tile : array){
+-            cons.get(tile);
++            if(tile != null) cons.get(tile);
+         }
+     }
+ 
+@@ -131,10 +305,16 @@ public class Tiles implements Iterable<Tile>{
+         return new TileIterator();
+     }
+ 
++    /** Recorre las casillas existentes (en modo anillo, saltando los huecos vacíos). */
+     private class TileIterator implements Iterator<Tile>{
+         int index = 0;
+ 
+         TileIterator(){
++            skip();
++        }
++
++        private void skip(){
++            while(index < array.length && array[index] == null) index++;
+         }
+ 
+         @Override
+@@ -144,7 +324,9 @@ public class Tiles implements Iterable<Tile>{
+ 
+         @Override
+         public Tile next(){
+-            return array[index++];
++            Tile t = array[index++];
++            skip();
++            return t;
+         }
+     }
+ }

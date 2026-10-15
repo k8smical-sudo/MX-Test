@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenWorld <openworld@example.com>
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Subject: [PATCH] OW(World): ChunkLoad/UnloadEvent,
+ World.publishChunk/unloadChunk y chunkHasBuildings
+
+---
+ core/src/mindustry/core/World.java     | 30 ++++++++++++++++++++++++++
+ core/src/mindustry/game/EventType.java | 26 ++++++++++++++++++++++
+ core/src/mindustry/world/Tiles.java    | 15 +++++++++++++
+ 3 files changed, 71 insertions(+)
+
+diff --git a/core/src/mindustry/core/World.java b/core/src/mindustry/core/World.java
+index e073f328e351c6afe9aa721e41ac25b848521178..0728d8fbf62b1b2bdbe1e87351c4680ece3e76e5 100644
+--- a/core/src/mindustry/core/World.java
++++ b/core/src/mindustry/core/World.java
+@@ -250,6 +250,36 @@ public class World{
+         return generating;
+     }
+ 
++    // ---------------------------------------------------------------- ring worlds (chunk streaming, no fixed window)
++
++    /** @return whether the current world is a ring world: tiles exist only for loaded chunks (see {@link Tiles#ring}). */
++    public boolean isRing(){
++        return tiles != null && tiles.ring;
++    }
++
++    /**
++     * Publishes a chunk built elsewhere (see {@link Tiles#publishChunk}) and fires {@link ChunkLoadEvent}. Main thread only.
++     * The slot must be free: call {@link #unloadChunk} on the chunk that holds it first.
++     * @return false if the chunk was already loaded
++     */
++    public boolean publishChunk(int cx, int cy, Tile[] block){
++        if(!isRing()) throw new IllegalStateException("publishChunk needs a ring world");
++        if(!tiles.publishChunk(cx, cy, block)) return false;
++        Events.fire(new ChunkLoadEvent(cx, cy));
++        return true;
++    }
++
++    /**
++     * Fires {@link ChunkUnloadEvent} and then releases the chunk. Main thread only.
++     * @return false, and does nothing, if the chunk is not loaded or still has Buildings (save and remove them first)
++     */
++    public boolean unloadChunk(int cx, int cy){
++        if(!isRing() || !tiles.chunkLoaded(cx, cy) || tiles.chunkHasBuildings(cx, cy)) return false;
++        Events.fire(new ChunkUnloadEvent(cx, cy));
++        tiles.releaseChunk(cx, cy);
++        return true;
++    }
++
+     public void loadGenerator(int width, int height, Cons<Tiles> generator){
+         beginMapLoad();
+ 
+diff --git a/core/src/mindustry/game/EventType.java b/core/src/mindustry/game/EventType.java
+index 0ee3a942b7c6b4222e715d8119c78ca4f1bdbbc3..f7892c85039a687cb6cfd12551cbe24a38dfa571 100644
+--- a/core/src/mindustry/game/EventType.java
++++ b/core/src/mindustry/game/EventType.java
+@@ -110,6 +110,32 @@ public class EventType{
+     /** Called when a game begins and the world tiles are initiated. About to updates tile proximity and sets up physics for the world(Before WorldLoadEvent) */
+     public static class WorldLoadEndEvent{}
+ 
++    /**
++     * Ring worlds only. Called *after* a chunk (32x32 tiles, chunk coordinates cx = tile x >> 5) has been published and its tiles exist.
++     * Listeners index the chunk ONCE here instead of reacting to 1024 TileChangeEvents. Do not modify tiles inside listener code.
++     */
++    public static class ChunkLoadEvent{
++        public final int cx, cy;
++
++        public ChunkLoadEvent(int cx, int cy){
++            this.cx = cx;
++            this.cy = cy;
++        }
++    }
++
++    /**
++     * Ring worlds only. Called *before* a chunk is released: its tiles still exist, so listeners can remove them from their indices.
++     * The chunk has no Buildings at this point. Do not modify tiles inside listener code.
++     */
++    public static class ChunkUnloadEvent{
++        public final int cx, cy;
++
++        public ChunkUnloadEvent(int cx, int cy){
++            this.cx = cx;
++            this.cy = cy;
++        }
++    }
++
+     /** Called when a save loads custom data patches. {@link #assets} can be modified in the event handler. The array may be empty. */
+     public static class DataPatchLoadEvent{
+         public final Seq<DataAsset> assets;
+diff --git a/core/src/mindustry/world/Tiles.java b/core/src/mindustry/world/Tiles.java
+index 0b9e8a1391345fe2945575477955707fd5269ab8..b609c456c66ef54cd9a0d8155b52f537e0d740b7 100644
+--- a/core/src/mindustry/world/Tiles.java
++++ b/core/src/mindustry/world/Tiles.java
+@@ -185,6 +185,21 @@ public class Tiles implements Iterable<Tile>{
+         loadedChunks--;
+     }
+ 
++    /** @return whether any tile of the loaded chunk has a Building (a multiblock counts for every tile it covers, even from a neighbor chunk). Ring mode only. */
++    public boolean chunkHasBuildings(int cx, int cy){
++        if(!ring) throw new UnsupportedOperationException("chunkHasBuildings is only for ring mode");
++        if(!chunkLoaded(cx, cy)) return false;
++        int x0 = cx << chunkBits, y0 = cy << chunkBits, col = x0 & mask;
++        for(int ly = 0; ly < chunkSize; ly++){
++            int row = ((y0 + ly) & mask) << bits;
++            for(int lx = 0; lx < chunkSize; lx++){
++                Tile t = array[row + col + lx];   //alineado a 32: las 32 casillas de la fila son contiguas, sin vuelta
++                if(t != null && t.build != null) return true;
++            }
++        }
++        return false;
++    }
++
+     /** Llama a cons(cx, cy) por cada chunk cargado (coordenadas de chunk). Solo modo anillo. */
+     public void eachLoadedChunk(Intc2 cons){
+         if(!ring) return;

@@ -1,0 +1,289 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenWorld <openworld@example.com>
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Subject: [PATCH] OW(Pathfinder): flowfield en anillo, neighborIndex y
+ ControlPathfinder cerrado
+
+---
+ core/src/mindustry/ai/BlockIndexer.java      |  2 +-
+ core/src/mindustry/ai/ControlPathfinder.java | 14 ++++
+ core/src/mindustry/ai/Pathfinder.java        | 84 +++++++++++++++++---
+ core/src/mindustry/core/World.java           |  9 +++
+ core/src/mindustry/input/InputHandler.java   |  4 +-
+ core/src/mindustry/world/Tiles.java          | 16 ++++
+ 6 files changed, 116 insertions(+), 13 deletions(-)
+
+diff --git a/core/src/mindustry/ai/BlockIndexer.java b/core/src/mindustry/ai/BlockIndexer.java
+index c72dd992945c8fbebee7a3950246b9f56d3f7392..5339113e3174abf30b2cd65fab309d101095aab6 100644
+--- a/core/src/mindustry/ai/BlockIndexer.java
++++ b/core/src/mindustry/ai/BlockIndexer.java
+@@ -619,7 +619,7 @@ public class BlockIndexer{
+ 
+             //insert the new tile into the quadtree for targeting
+             if(data.buildingTree == null){
+-                data.buildingTree = new QuadTree<>(new Rect(0, 0, world.unitWidth(), world.unitHeight()));
++                data.buildingTree = new QuadTree<>(world.getTreeBounds(new Rect()));
+             }
+             data.buildingTree.insert(tile.build);
+ 
+diff --git a/core/src/mindustry/ai/ControlPathfinder.java b/core/src/mindustry/ai/ControlPathfinder.java
+index 52606f7ae181d9ff1af05c2e11e01f84e4881d13..bf395448634b9db22a390f503391bab954abf1f8 100644
+--- a/core/src/mindustry/ai/ControlPathfinder.java
++++ b/core/src/mindustry/ai/ControlPathfinder.java
+@@ -353,6 +353,7 @@ public class ControlPathfinder implements Runnable{
+     }
+ 
+     public void updateTile(Tile tile){
++        if(world.isRing()) return; //desactivado en mundos en anillo: ver el comentario en getPathPosition
+         tile.getLinkedTiles(this::updateSingleTile);
+     }
+ 
+@@ -1135,6 +1136,19 @@ public class ControlPathfinder implements Runnable{
+         pathResult.next = null;
+         pathResult.dest.setZero();
+ 
++        // MUNDO EN ANILLO: ControlPathfinder desactivado a propósito. Usa posiciones planas (pos % wwidth) y clústeres de ancho fijo,
++        // que no sirven con coordenadas virtuales; el Pathfinder básico (flowfield) cubre a los enemigos. Las unidades ordenadas van
++        // en línea recta hacia su destino. Reconsiderar reescribirlo si:
++        //  1) las unidades que el jugador ordena mover/atacar se atascan en paredes (hoy van en línea recta);
++        //  2) se necesitan rutas largas que rodeen obstáculos dentro de lo cargado (formaciones, logística con unidades);
++        //  3) las unidades de LogicAI (procesadores) deben esquivar muros;
++        //  4) el flowfield sobre todo el anillo (~262 000 casillas) resulta caro con muchas órdenes distintas a la vez.
++        if(world.isRing()){
++            pathResult.move = true;
++            pathResult.dest.set(destination);
++            return pathResult;
++        }
++
+         int costId = unit.type.pathCostId;
+         PathCost cost = idToCost(costId);
+         Tile tileOn = unit.tileOn();
+diff --git a/core/src/mindustry/ai/Pathfinder.java b/core/src/mindustry/ai/Pathfinder.java
+index 37b4a9e8115af7ea388311c85dafd61533c1c4c5..67d937be1f3f39d29b47014a323391f7589deb5e 100644
+--- a/core/src/mindustry/ai/Pathfinder.java
++++ b/core/src/mindustry/ai/Pathfinder.java
+@@ -117,16 +117,17 @@ public class Pathfinder implements Runnable{
+             stop();
+ 
+             //reset and update internal tile array
+-            tiles = new int[world.width() * world.height()];
++            tiles = new int[world.tiles.capacity()];
+             wwidth = world.width();
+             wheight = world.height();
+             threadList = new Seq<>();
+             mainList = new Seq<>();
+             clearCache();
+ 
+-            for(int i = 0; i < tiles.length; i++){
+-                Tile tile = world.tiles.geti(i);
+-                tiles[i] = packTile(tile);
++            //mundo en anillo: los huecos sin chunk valen "no cargado" (infranqueable) y el iterador salta los huecos nulos
++            if(world.tiles.ring) java.util.Arrays.fill(tiles, unloadedPathTile);
++            for(Tile tile : world.tiles){
++                tiles[tile.array()] = packTile(tile);
+             }
+ 
+             //don't bother setting up paths unless necessary
+@@ -147,6 +148,14 @@ public class Pathfinder implements Runnable{
+ 
+         Events.on(ResetEvent.class, event -> stop());
+ 
++        //mundos en anillo: un chunk entra o sale entero (en vez de 1024 TileChangeEvent)
++        Events.on(ChunkLoadEvent.class, e -> {
++            if(tiles != null) packChunk(e.cx, e.cy);
++        });
++        Events.on(ChunkUnloadEvent.class, e -> {
++            if(tiles != null) unpackChunk(e.cx, e.cy);
++        });
++
+         Events.on(TileChangeEvent.class, event -> {
+             if(state.isEditor()) return;
+ 
+@@ -276,10 +285,45 @@ public class Pathfinder implements Runnable{
+         );
+     }
+ 
++    /** Casilla de un hueco sin chunk cargado: sólida, de equipo 0, de patas y totalmente profunda => infranqueable para suelo, patas, neoplasma y hover. */
++    private static final int unloadedPathTile = PathTile.get(0, 0, true, false, true, false, false, false, false, false, false, true, false, false);
++
+     public int get(int x, int y){
++        //en anillo un (x, y) sin chunk podría coincidir con el hueco de OTRO chunk (alias): se trata como no cargado
++        if(world.tiles.ring) return world.tiles.in(x, y) ? tiles[world.tiles.index(x, y)] : unloadedPathTile;
+         return tiles[x + y * wwidth];
+     }
+ 
++    /** Mundos en anillo: reempaqueta un chunk recién publicado y el borde de 1 casilla de sus vecinos (packTile mira 4 vecinos y diagonales). */
++    private void packChunk(int cx, int cy){
++        int x0 = cx << Tiles.chunkBits, y0 = cy << Tiles.chunkBits, n = Tiles.chunkSize;
++        for(int y = y0; y < y0 + n; y++){
++            for(int x = x0; x < x0 + n; x++){
++                Tile t = world.tiles.get(x, y);
++                if(t != null) tiles[t.array()] = packTile(t);
++            }
++        }
++        for(int i = -1; i <= n; i++){
++            for(int[] e : new int[][]{{x0 + i, y0 - 1}, {x0 + i, y0 + n}, {x0 - 1, y0 + i}, {x0 + n, y0 + i}}){
++                Tile t = world.tiles.get(e[0], e[1]);
++                if(t != null) tiles[t.array()] = packTile(t);
++            }
++        }
++        needsRefresh = true;
++    }
++
++    /** Mundos en anillo: antes de liberar un chunk (sus casillas aún existen) sus huecos pasan a "no cargado". */
++    private void unpackChunk(int cx, int cy){
++        int x0 = cx << Tiles.chunkBits, y0 = cy << Tiles.chunkBits, n = Tiles.chunkSize;
++        for(int y = y0; y < y0 + n; y++){
++            for(int x = x0; x < x0 + n; x++){
++                Tile t = world.tiles.get(x, y);
++                if(t != null) tiles[t.array()] = unloadedPathTile;
++            }
++        }
++        needsRefresh = true;
++    }
++
+     /** Starts or restarts the pathfinding thread. */
+     private void start(){
+         stop();
+@@ -368,6 +412,16 @@ public class Pathfinder implements Runnable{
+         return cache[team.id][costType][fieldType];
+     }
+ 
++    /** Índice de flowfield de (x, y). En un mundo en anillo (resolución 1) es el índice del anillo, o -1 si su chunk no está cargado. */
++    private int flowIndex(int x, int y, int res, int ww){
++        if(world.tiles.ring) return world.tiles.in(x, y) ? world.tiles.index(x, y) : -1;
++        return x / res + y / res * ww;
++    }
++
++    private boolean passableAt(Flowfield path, int pos){
++        return pos >= 0 && path.passable(pos);
++    }
++
+     /** Gets next tile to travel to. Main thread only. */
+     public @Nullable Tile getTargetTile(Tile tile, Flowfield path){
+         return getTargetTile(tile, path, true);
+@@ -407,7 +461,7 @@ public class Pathfinder implements Runnable{
+         int[] values = path.hasComplete ? path.completeWeights : path.weights;
+         int res = path.resolution;
+         int ww = path.width;
+-        int apos = tile.x/res + tile.y/res * ww;
++        int apos = flowIndex(tile.x, tile.y, res, ww);
+         int value = values[apos];
+ 
+         var points = diagonals ? Geometry.d8 : Geometry.d4;
+@@ -421,12 +475,12 @@ public class Pathfinder implements Runnable{
+             Tile other = world.tile(dx, dy);
+             if(other == null) continue;
+ 
+-            int packed = dx/res + dy/res * ww;
++            int packed = flowIndex(dx, dy, res, ww);
+             int avoidance = avoid == null ? 0 : avoid[packed] > Integer.MAX_VALUE - avoidanceId ? 1 : 0;
+             int cost = values[packed] + avoidance;
+ 
+             if(cost < value && avoidance == 0 && (current == null || cost < tl) && path.passable(packed) &&
+-            !(point.x != 0 && point.y != 0 && (!path.passable(((tile.x + point.x)/res + tile.y/res*ww)) || !path.passable((tile.x/res + (tile.y + point.y)/res*ww))))){ //diagonal corner trap
++            !(point.x != 0 && point.y != 0 && (!passableAt(path, flowIndex(tile.x + point.x, tile.y, res, ww)) || !passableAt(path, flowIndex(tile.x, tile.y + point.y, res, ww))))){ //diagonal corner trap
+                 current = other;
+                 tl = cost;
+             }
+@@ -501,6 +555,7 @@ public class Pathfinder implements Runnable{
+ 
+         int counter = 0;
+         int w = path.width, h = path.height;
++        final boolean ringMode = world.tiles.ring;
+ 
+         while(path.frontier.size > 0){
+             int tile = path.frontier.removeLast();
+@@ -516,11 +571,18 @@ public class Pathfinder implements Runnable{
+             if(cost != impassable){
+                 for(Point2 point : Geometry.d4){
+ 
+-                    int dx = (tile % w) + point.x, dy = (tile / w) + point.y;
++                    int newPos;
++                    if(ringMode){
++                        //los vecinos se buscan por coordenadas virtuales (la costura del anillo no es una pared; los huecos sin chunk no cuentan)
++                        newPos = world.tiles.neighborIndex(tile, point.x, point.y);
++                        if(newPos < 0) continue;
++                    }else{
++                        int dx = (tile % w) + point.x, dy = (tile / w) + point.y;
+ 
+-                    if(dx < 0 || dy < 0 || dx >= w || dy >= h) continue;
++                        if(dx < 0 || dy < 0 || dx >= w || dy >= h) continue;
+ 
+-                    int newPos = dx + dy * w;
++                        newPos = dx + dy * w;
++                    }
+                     int otherCost = path.getCost(tiles, newPos);
+ 
+                     if((path.weights[newPos] > cost + otherCost || path.searches[newPos] < path.search) && otherCost != impassable){
+@@ -646,6 +708,8 @@ public class Pathfinder implements Runnable{
+         }
+ 
+         public Flowfield(int resolution){
++            //en un mundo en anillo los vecinos se buscan por casilla: no hay flowfields a otra resolución
++            if(world.isRing() && resolution != 1) throw new IllegalArgumentException("ring worlds only support flowfields with resolution 1");
+             this.resolution = resolution;
+             this.width = Mathf.ceil((float)wwidth / resolution);
+             this.height = Mathf.ceil((float)wheight / resolution);
+diff --git a/core/src/mindustry/core/World.java b/core/src/mindustry/core/World.java
+index c69306dbf7ff9cfc67d98d72781c1e6687362577..34b8d49c964b850811c0fc36c91c51864734ea91 100644
+--- a/core/src/mindustry/core/World.java
++++ b/core/src/mindustry/core/World.java
+@@ -238,6 +238,15 @@ public class World{
+         Events.fire(new WorldLoadEvent());
+     }
+ 
++    /**
++     * Límites para los árboles de edificios y de planes de construcción. En un mapa normal son los de siempre (0, 0, ancho, alto);
++     * en un mundo en anillo, todo el rango virtual: un QuadTree ignora EN SILENCIO lo que queda fuera de sus límites, y con los de
++     * siempre los edificios en coordenadas negativas o más allá del lado del búfer no serían objetivo de nadie.
++     */
++    public Rect getTreeBounds(Rect in){
++        return isRing() ? getQuadBounds(in) : in.set(0, 0, unitWidth(), unitHeight());
++    }
++
+     public Rect getQuadBounds(Rect in){
+         if(height() == 0) throw new Error("World is empty");
+         if(isRing()){
+diff --git a/core/src/mindustry/input/InputHandler.java b/core/src/mindustry/input/InputHandler.java
+index 1eb91c9e66769fcf3ec1b0edc3b1d5e8480a5f95..58f7ec848520a53187d3d4a020c92e7d340655d1 100644
+--- a/core/src/mindustry/input/InputHandler.java
++++ b/core/src/mindustry/input/InputHandler.java
+@@ -154,8 +154,8 @@ public abstract class InputHandler implements InputProcessor, GestureListener{
+     }
+ 
+     protected void initQuadtrees(){
+-        playerPlanTree = new QuadTree<>(new Rect(0f, 0f, world.unitWidth(), world.unitHeight()));
+-        selectPlanTree = new QuadTree<>(new Rect(0f, 0f, world.unitWidth(), world.unitHeight()));
++        playerPlanTree = new QuadTree<>(world.getTreeBounds(new Rect()));
++        selectPlanTree = new QuadTree<>(world.getTreeBounds(new Rect()));
+         createPlanLists();
+     }
+ 
+diff --git a/core/src/mindustry/world/Tiles.java b/core/src/mindustry/world/Tiles.java
+index 8777ca6192e1c4632d1cbd6ce2d8ff11ac9636eb..6fab5c8f463af1588d77b5c14282043285a006e8 100644
+--- a/core/src/mindustry/world/Tiles.java
++++ b/core/src/mindustry/world/Tiles.java
+@@ -230,6 +230,22 @@ public class Tiles implements Iterable<Tile>{
+         return ring ? ((x & mask) | ((y & mask) << bits)) : x + y * width;
+     }
+ 
++    /**
++     * Índice de la casilla vecina (dx, dy) de la casilla de índice {@code idx}, o -1 si no existe (fuera del mapa, o chunk no cargado).
++     * Es la forma de recorrer vecinos sin deducir coordenadas del índice: en anillo busca la casilla por su (x, y) VIRTUAL, así que la
++     * costura del anillo no es una pared ni se conectan dos regiones que solo son adyacentes en el búfer pero están lejos en el mundo.
++     */
++    public int neighborIndex(int idx, int dx, int dy){
++        if(ring){
++            Tile t = array[idx];
++            if(t == null) return -1;
++            int nx = t.x + dx, ny = t.y + dy;
++            return in(nx, ny) ? ((nx & mask) | ((ny & mask) << bits)) : -1;
++        }
++        int x = idx % width + dx, y = idx / width + dy;
++        return (x < 0 || y < 0 || x >= width || y >= height) ? -1 : x + y * width;
++    }
++
+     // ---------------------------------------------------------------- estados temporales y entidades (por índice)
+ 
+     public long getTmpFloorState(int pos){

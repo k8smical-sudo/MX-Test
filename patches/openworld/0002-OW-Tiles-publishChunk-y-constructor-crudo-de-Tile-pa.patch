@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenWorld <openworld@example.com>
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Subject: [PATCH] OW(Tiles): publishChunk y constructor crudo de Tile para
+ terreno
+
+---
+ core/src/mindustry/world/Tile.java  | 14 ++++++++++++++
+ core/src/mindustry/world/Tiles.java | 30 +++++++++++++++++++++++++++++
+ 2 files changed, 44 insertions(+)
+
+diff --git a/core/src/mindustry/world/Tile.java b/core/src/mindustry/world/Tile.java
+index aeb317458aaa3664b61e6d8ea95b7d5f70ad421e..037a91dc95ca771716746f4fe3afdf6408726f9c 100644
+--- a/core/src/mindustry/world/Tile.java
++++ b/core/src/mindustry/world/Tile.java
+@@ -65,6 +65,20 @@ public class Tile implements Position, QuadTreeObject, Displayable{
+         changed();
+     }
+ 
++    /**
++     * Constructor CRUDO para terreno (suelo, superposición y muro sin Building): solo asigna campos. No llama a changeBuild() ni a
++     * changed(), no dispara eventos y no toca el mundo, así que es seguro en un hilo de fondo (ver {@link Tiles#publishChunk}).
++     * Un {@code wall} con Building (block.hasBuilding()) NO sirve aquí: colócalo después con setBlock.
++     */
++    public Tile(int x, int y, Floor floor, Floor overlay, Block wall, byte data){
++        this.x = (short)x;
++        this.y = (short)y;
++        this.floor = floor;
++        this.overlay = overlay;
++        this.block = wall;
++        this.data = data;
++    }
++
+     public Tile(int x, int y, int floor, int overlay, int wall){
+         this(x, y, content.block(floor), content.block(overlay), content.block(wall));
+     }
+diff --git a/core/src/mindustry/world/Tiles.java b/core/src/mindustry/world/Tiles.java
+index f5dd7fb925be6ea110f8fd05284371efcad83a77..0b9e8a1391345fe2945575477955707fd5269ab8 100644
+--- a/core/src/mindustry/world/Tiles.java
++++ b/core/src/mindustry/world/Tiles.java
+@@ -134,6 +134,36 @@ public class Tiles implements Iterable<Tile>{
+         }
+     }
+ 
++    /**
++     * Publica un bloque de 32x32 casillas YA CONSTRUIDO (típicamente en un hilo de fondo) como el chunk (cx, cy). Es el camino barato
++     * de carga: el hilo principal solo copia 32 filas de referencias y escribe el dueño, sin crear ni inicializar una sola casilla.
++     * {@code block[ly * 32 + lx]} debe ser la casilla de coordenadas (cx*32+lx, cy*32+ly). Las casillas del bloque no deben ser
++     * alcanzables por nadie hasta publicarlas (publicación segura: llamar desde el hilo principal, tras entregarlas desde el trabajador).
++     * NO dispara eventos. Terreno sin Building: los bloques con Building se colocan después con setBlock, ya con el chunk publicado.
++     * @return false si el chunk ya estaba cargado (no se sobrescribe); lanza IllegalStateException si su hueco lo tiene otro chunk.
++     */
++    public boolean publishChunk(int cx, int cy, Tile[] block){
++        if(!ring) throw new UnsupportedOperationException("publishChunk is only for ring mode");
++        if(block.length != chunkSize * chunkSize) throw new IllegalArgumentException("block must have " + chunkSize * chunkSize + " tiles");
++        int x0 = cx << chunkBits, y0 = cy << chunkBits;
++        if(outOfRange(x0, y0) || outOfRange(x0 + chunkSize - 1, y0 + chunkSize - 1)) throw new IllegalArgumentException("chunk " + cx + ", " + cy + " out of world range");
++        Tile first = block[0], last = block[block.length - 1];
++        if(first == null || last == null || first.x != x0 || first.y != y0 || last.x != x0 + chunkSize - 1 || last.y != y0 + chunkSize - 1){
++            throw new IllegalArgumentException("block coordinates do not match chunk " + cx + ", " + cy);
++        }
++        int s = slotOf(cx, cy), p = packChunk(cx, cy);
++        if(owner[s] == p) return false;
++        if(owner[s] != noOwner) throw new IllegalStateException("slot of chunk " + cx + ", " + cy + " is held by another chunk; release it first");
++        //un chunk está alineado a 32 y el anillo es múltiplo de 32: sus 32 casillas de cada fila son contiguas en el anillo (sin vuelta)
++        int colStart = x0 & mask;
++        for(int ly = 0; ly < chunkSize; ly++){
++            System.arraycopy(block, ly << chunkBits, array, (((y0 + ly) & mask) << bits) | colStart, chunkSize);
++        }
++        owner[s] = p;
++        loadedChunks++;
++        return true;
++    }
++
+     /** Suelta el chunk: sus casillas dejan de existir (get devuelve null) y el hueco queda libre. No hace nada si no estaba cargado. */
+     public void releaseChunk(int cx, int cy){
+         if(!ring) throw new UnsupportedOperationException("releaseChunk is only for ring mode");

@@ -1,0 +1,189 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenWorld <openworld@example.com>
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Subject: [PATCH] OW(World): openRing, limites virtuales, ChunkDarkness y
+ getDarkness sin bordes
+
+---
+ core/src/mindustry/core/World.java          | 28 +++++++-
+ core/src/mindustry/world/ChunkDarkness.java | 76 +++++++++++++++++++++
+ core/src/mindustry/world/Tiles.java         |  9 +++
+ 3 files changed, 110 insertions(+), 3 deletions(-)
+ create mode 100644 core/src/mindustry/world/ChunkDarkness.java
+
+diff --git a/core/src/mindustry/core/World.java b/core/src/mindustry/core/World.java
+index 0728d8fbf62b1b2bdbe1e87351c4680ece3e76e5..c69306dbf7ff9cfc67d98d72781c1e6687362577 100644
+--- a/core/src/mindustry/core/World.java
++++ b/core/src/mindustry/core/World.java
+@@ -231,7 +231,8 @@ public class World{
+ 
+         addDarkness(tiles);
+ 
+-        Groups.resize(-finalWorldBounds, -finalWorldBounds, tiles.width * tilesize + finalWorldBounds * 2, tiles.height * tilesize + finalWorldBounds * 2);
++        getQuadBounds(Tmp.r1);
++        Groups.resize(Tmp.r1.x, Tmp.r1.y, Tmp.r1.width, Tmp.r1.height);
+ 
+         generating = false;
+         Events.fire(new WorldLoadEvent());
+@@ -239,6 +240,11 @@ public class World{
+ 
+     public Rect getQuadBounds(Rect in){
+         if(height() == 0) throw new Error("World is empty");
++        if(isRing()){
++            //un mundo en anillo abarca todo el rango virtual (coordenadas de un short), no el lado del búfer
++            float min = Tiles.minCoord * tilesize - finalWorldBounds, size = (Tiles.maxCoord - Tiles.minCoord + 1) * tilesize + finalWorldBounds * 2;
++            return in.set(min, min, size, size);
++        }
+         return in.set(-finalWorldBounds, -finalWorldBounds, width() * tilesize + finalWorldBounds * 2, height() * tilesize + finalWorldBounds * 2);
+     }
+ 
+@@ -252,6 +258,18 @@ public class World{
+ 
+     // ---------------------------------------------------------------- ring worlds (chunk streaming, no fixed window)
+ 
++    /**
++     * Opens an EMPTY ring world (see {@link Tiles#ring}) instead of loading a map: no tile exists until a chunk is published
++     * with {@link #publishChunk}. Fires WorldLoadBeginEvent / WorldLoadEvent like a normal load, so every system resets as usual.
++     * Rules, teams and entities are the caller's business, exactly as when a save is loaded.
++     */
++    public void openRing(int chunksPerSideLog2){
++        clearBuildings();
++        beginMapLoad();
++        tiles = Tiles.ring(chunksPerSideLog2);
++        endMapLoad();
++    }
++
+     /** @return whether the current world is a ring world: tiles exist only for loaded chunks (see {@link Tiles#ring}). */
+     public boolean isRing(){
+         return tiles != null && tiles.ring;
+@@ -428,6 +446,9 @@ public class World{
+     }
+ 
+     public void addDarkness(Tiles tiles){
++        //anillo: la oscuridad llega ya calculada en cada chunk (ver ChunkDarkness); recorrer huecos vacíos fallaría
++        if(tiles.ring) return;
++
+         byte[] dark = new byte[tiles.width * tiles.height];
+         byte[] writeBuffer = new byte[tiles.width * tiles.height];
+ 
+@@ -515,7 +536,8 @@ public class World{
+     public float getDarkness(int x, int y){
+         float dark = 0;
+ 
+-        if(Vars.state.rules.borderDarkness){
++        //en un mundo en anillo no hay borde: tiles.width es el lado del búfer, no un límite del mundo
++        if(Vars.state.rules.borderDarkness && !tiles.ring){
+             int edgeBlend = 2;
+             int edgeDst;
+ 
+@@ -533,7 +555,7 @@ public class World{
+             }
+         }
+ 
+-        if(state.hasSector() && state.getSector().preset == null){
++        if(!tiles.ring && state.hasSector() && state.getSector().preset == null){
+             int circleBlend = 5;
+             //quantized angle
+             float offset = state.getSector().rect.rotation + 90;
+diff --git a/core/src/mindustry/world/ChunkDarkness.java b/core/src/mindustry/world/ChunkDarkness.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..42c2d8d41295d6f9fabd75f30e6031ecaa472955
+--- /dev/null
++++ b/core/src/mindustry/world/ChunkDarkness.java
+@@ -0,0 +1,76 @@
++package mindustry.world;
++
++/**
++ * Oscuridad de muros por chunk, para mundos en anillo. Es la misma función que {@code World.addDarkness}, pero sobre un plano
++ * INFINITO y por chunk, y sin tocar el mundo: se puede ejecutar en un hilo de fondo con el terreno que ya conoce el generador
++ * (también el de los chunks vecinos aún sin cargar), así el resultado es exacto desde el principio y no hay que recalcular los bordes
++ * cuando un vecino se carga después. El resultado va en el parámetro {@code data} del constructor crudo de {@link Tile}.
++ * <p>
++ * Semántica de vanilla: una casilla "oscurecible" ({@code Tile.isDarkened()}) recibe un nivel = min(darkRadius, distancia
++ * Manhattan por vecinos de 4 hasta la casilla no oscurecible más cercana); y si es nivel máximo y sus 4 vecinas son también
++ * oscurecibles de nivel máximo, vale darkRadius + 1. Las no oscurecibles no cambian (0).
++ */
++public final class ChunkDarkness{
++    public static final int darkRadius = 4;   //igual que Vars.darkRadius
++    /** Casillas de contexto necesarias alrededor del chunk. El nivel de una casilla depende de las casillas oscurecibles hasta
++     *  darkRadius de distancia (la información avanza una casilla por iteración), y la comprobación de "llena" mira el nivel de un
++     *  vecino, que depende de otras hasta darkRadius más allá: darkRadius + 1. Con menos deja de ser exacto: ver las pruebas. */
++    public static final int margin = darkRadius + 1;
++    public static final int padded = Tiles.chunkSize + 2 * margin;
++
++    private ChunkDarkness(){}
++
++    /** Índice en el mapa {@code darkened} de la casilla local (lx, ly), con lx, ly en [-margin, chunkSize + margin). */
++    public static int paddedIndex(int lx, int ly){
++        return (ly + margin) * padded + (lx + margin);
++    }
++
++    /**
++     * @param darkened padded*padded: si cada casilla (el chunk y {@link #margin} de contexto a cada lado) es oscurecible
++     * @param out chunkSize*chunkSize (fila a fila): nivel de oscuridad de cada casilla del chunk (0 si no es oscurecible)
++     * @param dark búfer de trabajo padded*padded (reutilizable entre llamadas)
++     * @param buf otro búfer de trabajo padded*padded
++     * @return true si el chunk es MACIZO: todas sus casillas están en el nivel máximo (darkRadius + 1), es decir, roca a más de
++     * darkRadius casillas de cualquier hueco. No se ve, no se puede alcanzar por tierra ni construir en él: no hace falta publicarlo.
++     * En un mundo en anillo una casilla ausente ya es sólida y oscura (World.solid, EntityCollisions.solid y Build.validPlace tratan
++     * null como "no"), así que dejarlo sin publicar ahorra su memoria, su generación de casillas y todos los índices.
++     */
++    public static boolean compute(boolean[] darkened, byte[] out, byte[] dark, byte[] buf){
++        final int n = padded;
++        for(int i = 0; i < n * n; i++) dark[i] = darkened[i] ? (byte)darkRadius : 0;
++
++        for(int it = 0; it < darkRadius; it++){
++            for(int y = 0; y < n; y++){
++                for(int x = 0; x < n; x++){
++                    int i = y * n + x;
++                    byte d = dark[i];
++                    boolean lower = (x > 0 && dark[i - 1] < d) || (x < n - 1 && dark[i + 1] < d)
++                        || (y > 0 && dark[i - n] < d) || (y < n - 1 && dark[i + n] < d);
++                    buf[i] = (byte)Math.max(0, d - (lower ? 1 : 0));
++                }
++            }
++            System.arraycopy(buf, 0, dark, 0, n * n);
++        }
++
++        boolean macizo = true;
++        for(int ly = 0; ly < Tiles.chunkSize; ly++){
++            for(int lx = 0; lx < Tiles.chunkSize; lx++){
++                int i = paddedIndex(lx, ly);
++                byte v = 0;
++                if(darkened[i]){
++                    v = dark[i];
++                    if(dark[i] == darkRadius){
++                        boolean full = true;
++                        //en vanilla `tiles.in(...)` siempre es cierto aquí: el plano es infinito
++                        if(!(darkened[i - 1] && dark[i - 1] == 4) || !(darkened[i + 1] && dark[i + 1] == 4)
++                            || !(darkened[i - n] && dark[i - n] == 4) || !(darkened[i + n] && dark[i + n] == 4)) full = false;
++                        if(full) v = (byte)(darkRadius + 1);
++                    }
++                }
++                out[ly * Tiles.chunkSize + lx] = v;
++                if(v != darkRadius + 1) macizo = false;
++            }
++        }
++        return macizo;
++    }
++}
+diff --git a/core/src/mindustry/world/Tiles.java b/core/src/mindustry/world/Tiles.java
+index b609c456c66ef54cd9a0d8155b52f537e0d740b7..8777ca6192e1c4632d1cbd6ce2d8ff11ac9636eb 100644
+--- a/core/src/mindustry/world/Tiles.java
++++ b/core/src/mindustry/world/Tiles.java
+@@ -211,6 +211,15 @@ public class Tiles implements Iterable<Tile>{
+ 
+     // ---------------------------------------------------------------- índice por casilla
+ 
++    /**
++     * Tamaño que deben tener los arrays "por casilla" (flowfields, niebla...) indexados con {@link #index}. Úsalo en vez de
++     * width * height: así el día que el almacén deje de ser un anillo (p. ej. un reparto por bloques libres) esos arrays no se tocan.
++     * Regla: nunca deduzcas coordenadas de un índice; busca la casilla con {@link #geti} y lee su x/y.
++     */
++    public int capacity(){
++        return array.length;
++    }
++
+     /**
+      * Índice de la casilla (x, y) para arrays width*height propios (flowfields, niebla, etc.). En modo denso es x + y*width;
+      * en anillo es (x & mask) + (y & mask)*width, válido para cualquier coordenada virtual. Dos casillas VIVAS nunca comparten

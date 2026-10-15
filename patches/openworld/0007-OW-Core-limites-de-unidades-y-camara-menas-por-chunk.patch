@@ -1,0 +1,502 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenWorld <openworld@example.com>
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Subject: [PATCH] OW(Core): limites de unidades y camara, menas por chunk y
+ sistemas pequenos
+
+---
+ core/src/mindustry/ai/BlockIndexer.java       | 141 ++++++++++++++----
+ core/src/mindustry/ai/Pathfinder.java         |   5 +-
+ core/src/mindustry/ai/RingOreIndex.java       |  71 +++++++++
+ core/src/mindustry/ai/UnitGroup.java          |   2 +-
+ .../src/mindustry/async/AvoidanceProcess.java |  13 +-
+ core/src/mindustry/core/World.java            |   3 +-
+ core/src/mindustry/entities/Fires.java        |   4 +-
+ .../src/mindustry/entities/comp/UnitComp.java |   7 +
+ core/src/mindustry/input/MobileInput.java     |   8 +-
+ core/src/mindustry/logic/GlobalVars.java      |   5 +-
+ .../world/blocks/distribution/Conveyor.java   |   3 +-
+ 11 files changed, 219 insertions(+), 43 deletions(-)
+ create mode 100644 core/src/mindustry/ai/RingOreIndex.java
+
+diff --git a/core/src/mindustry/ai/BlockIndexer.java b/core/src/mindustry/ai/BlockIndexer.java
+index 5339113e3174abf30b2cd65fab309d101095aab6..e528d46fe360cdb3d15ef51b97501dcdc1965966 100644
+--- a/core/src/mindustry/ai/BlockIndexer.java
++++ b/core/src/mindustry/ai/BlockIndexer.java
+@@ -26,6 +26,8 @@ import static mindustry.Vars.*;
+ public class BlockIndexer{
+     /** Size of one quadrant. */
+     private static final int quadrantSize = 20;
++    /** Mundos en anillo: menas por cuadrante de 16 casillas con coordenadas virtuales (las matrices de abajo, del tamaño del mapa, no sirven). */
++    private RingOreIndex ringOres, ringWallOres;
+     private static final Rect rect = new Rect();
+     private static boolean returnBool = false;
+ 
+@@ -66,6 +68,10 @@ public class BlockIndexer{
+             addFloorIndex(event.tile, event.floor);
+         });
+ 
++        //mundos en anillo: un chunk entra o sale del índice entero (en vez de 1024 TileChangeEvent)
++        Events.on(ChunkLoadEvent.class, e -> indexChunk(e.cx, e.cy));
++        Events.on(ChunkUnloadEvent.class, e -> unindexChunk(e.cx, e.cy));
++
+         Events.on(WorldLoadEvent.class, event -> {
+             damagedTiles = new Seq[Team.all.length];
+             flagMap = new Seq[Team.all.length][BlockFlag.all.length];
+@@ -78,6 +84,8 @@ public class BlockIndexer{
+             allWallOres.clear();
+             ores = new IntSeq[content.items().size][][];
+             wallOres = new IntSeq[content.items().size][][];
++            ringOres = world.tiles.ring ? new RingOreIndex(content.items().size) : null;
++            ringWallOres = world.tiles.ring ? new RingOreIndex(content.items().size) : null;
+             quadWidth = Mathf.ceil(world.width() / (float)quadrantSize);
+             quadHeight = Mathf.ceil(world.height() / (float)quadrantSize);
+             blocksPresent = new boolean[content.blocks().size];
+@@ -92,27 +100,7 @@ public class BlockIndexer{
+             }
+ 
+             for(Tile tile : world.tiles){
+-                process(tile);
+-
+-                addFloorIndex(tile, tile.floor());
+-
+-                Item drop;
+-                int qx = tile.x / quadrantSize, qy = tile.y / quadrantSize;
+-                if(tile.block() == Blocks.air){
+-                    if((drop = tile.drop()) != null && ores.length > drop.id){
+-                        //add position of quadrant to list
+-                        if(ores[drop.id] == null) ores[drop.id] = new IntSeq[quadWidth][quadHeight];
+-                        if(ores[drop.id][qx][qy] == null) ores[drop.id][qx][qy] = new IntSeq(false, 16);
+-                        ores[drop.id][qx][qy].add(tile.pos());
+-                        allOres.increment(drop);
+-                    }
+-                }else if((drop = tile.wallDrop()) != null && wallOres.length > drop.id){
+-                    //add position of quadrant to list
+-                    if(wallOres[drop.id] == null) wallOres[drop.id] = new IntSeq[quadWidth][quadHeight];
+-                    if(wallOres[drop.id][qx][qy] == null) wallOres[drop.id][qx][qy] = new IntSeq(false, 16);
+-                    wallOres[drop.id][qx][qy].add(tile.pos());
+-                    allWallOres.increment(drop);
+-                }
++                indexTerrain(tile);
+             }
+ 
+             updatePresentOres();
+@@ -127,6 +115,78 @@ public class BlockIndexer{
+         });
+     }
+ 
++    /** Indexa el terreno de una casilla recién cargada: proceso general, suelo con flags y menas. (Antes iba dentro del bucle de WorldLoadEvent.) */
++    private void indexTerrain(Tile tile){
++        process(tile);
++
++        addFloorIndex(tile, tile.floor());
++
++        Item drop;
++        if(tile.block() == Blocks.air){
++            if((drop = tile.drop()) != null && ores.length > drop.id){
++                //add position of quadrant to list
++                oreSeq(false, drop.id, tile, true).add(tile.pos());
++                allOres.increment(drop);
++            }
++        }else if((drop = tile.wallDrop()) != null && wallOres.length > drop.id){
++            //add position of quadrant to list
++            oreSeq(true, drop.id, tile, true).add(tile.pos());
++            allWallOres.increment(drop);
++        }
++    }
++
++    /**
++     * Lista de menas del cuadrante de la casilla (de 20 casillas en un mapa normal; de 16 en un mundo en anillo), o null si no existe
++     * y {@code create} es false.
++     */
++    private @Nullable IntSeq oreSeq(boolean wall, int id, Tile tile, boolean create){
++        if(world.tiles.ring){
++            RingOreIndex idx = wall ? ringWallOres : ringOres;
++            return idx == null ? null : idx.seq(id, tile.x, tile.y, create);
++        }
++        IntSeq[][][] arr = wall ? wallOres : ores;
++        if(arr == null || id >= arr.length) return null;
++        int qx = tile.x / quadrantSize, qy = tile.y / quadrantSize;
++        if(arr[id] == null){
++            if(!create) return null;
++            arr[id] = new IntSeq[quadWidth][quadHeight];
++        }
++        if(arr[id][qx][qy] == null && create) arr[id][qx][qy] = new IntSeq(false, 16);
++        return arr[id][qx][qy];
++    }
++
++    /** Mundos en anillo: un chunk recién publicado entra al índice de una sola pasada (en vez de 1024 TileChangeEvent). */
++    private void indexChunk(int cx, int cy){
++        if(ores == null) return;
++        int x0 = cx << Tiles.chunkBits, y0 = cy << Tiles.chunkBits;
++        for(int y = y0; y < y0 + Tiles.chunkSize; y++){
++            for(int x = x0; x < x0 + Tiles.chunkSize; x++){
++                Tile tile = world.tiles.get(x, y);
++                if(tile != null) indexTerrain(tile);
++            }
++        }
++        updatePresentOres();
++    }
++
++    /** Mundos en anillo: antes de liberar un chunk (sus casillas aún existen) se quitan sus menas y sus suelos con flags. */
++    private void unindexChunk(int cx, int cy){
++        if(ores == null || ringOres == null) return;
++        for(int id = 0; id < ringOres.items(); id++){
++            int n = ringOres.dropChunk(id, cx, cy);
++            if(n > 0) allOres.increment(content.item(id), -n);
++            n = ringWallOres.dropChunk(id, cx, cy);
++            if(n > 0) allWallOres.increment(content.item(id), -n);
++        }
++        int x0 = cx << Tiles.chunkBits, y0 = cy << Tiles.chunkBits;
++        for(int y = y0; y < y0 + Tiles.chunkSize; y++){
++            for(int x = x0; x < x0 + Tiles.chunkSize; x++){
++                Tile tile = world.tiles.get(x, y);
++                if(tile != null && tile.floor().flags.size > 0) removeFloorIndex(tile, tile.floor());
++            }
++        }
++        updatePresentOres();
++    }
++
+     public Seq<Item> getAllPresentOres(){
+         return allPresentOres;
+     }
+@@ -238,33 +298,29 @@ public class BlockIndexer{
+         base.getLinkedTiles(tile -> {
+             Item drop = tile.drop(), wallDrop = tile.wallDrop();
+             if(drop == null && wallDrop == null) return;
+-            int qx = tile.x / quadrantSize, qy = tile.y / quadrantSize;
+             int pos = tile.pos();
++            IntSeq seq;
+ 
+             if(tile.block() == Blocks.air){
+                 if(drop != null && ores.length > drop.id){ //floor
+-                    if(ores[drop.id] == null) ores[drop.id] = new IntSeq[quadWidth][quadHeight];
+-                    if(ores[drop.id][qx][qy] == null) ores[drop.id][qx][qy] = new IntSeq(false, 16);
+-                    if(ores[drop.id][qx][qy].addUnique(pos)){
++                    if(oreSeq(false, drop.id, tile, true).addUnique(pos)){
+                         int old = allOres.increment(drop); //increment ore count only if not already counted
+                         if(old == 0) updatePresentOres();
+                     }
+                 }
+-                if(wallDrop != null && wallOres != null && wallOres[wallDrop.id] != null && wallOres[wallDrop.id][qx][qy] != null && wallOres[wallDrop.id][qx][qy].removeValue(pos)){ //wall
++                if(wallDrop != null && wallOres != null && (seq = oreSeq(true, wallDrop.id, tile, false)) != null && seq.removeValue(pos)){ //wall
+                     int old = allWallOres.increment(wallDrop, -1);
+                     if(old == 1) updatePresentOres();
+                 }
+             }else{
+                 if(wallDrop != null && wallOres.length > wallDrop.id){ //wall
+-                    if(wallOres[wallDrop.id] == null) wallOres[wallDrop.id] = new IntSeq[quadWidth][quadHeight];
+-                    if(wallOres[wallDrop.id][qx][qy] == null) wallOres[wallDrop.id][qx][qy] = new IntSeq(false, 16);
+-                    if(wallOres[wallDrop.id][qx][qy].addUnique(pos)){
++                    if(oreSeq(true, wallDrop.id, tile, true).addUnique(pos)){
+                         int old = allWallOres.increment(wallDrop); //increment ore count only if not already counted
+                         if(old == 0) updatePresentOres();
+                     }
+                 }
+ 
+-                if(drop != null && ores != null && drop.id < ores.length && ores[drop.id] != null && ores[drop.id][qx][qy] != null && ores[drop.id][qx][qy].removeValue(pos)){ //floor
++                if(drop != null && ores != null && drop.id < ores.length && (seq = oreSeq(false, drop.id, tile, false)) != null && seq.removeValue(pos)){ //floor
+                     int old = allOres.increment(drop, -1);
+                     if(old == 1) updatePresentOres();
+                 }
+@@ -525,6 +581,7 @@ public class BlockIndexer{
+ 
+     /** Find the closest ore block relative to a position. */
+     public Tile findClosestOre(float xp, float yp, Item item){
++        if(world.tiles.ring) return findClosestRing(ringOres, xp, yp, item, false);
+         if(item.id < ores.length && ores[item.id] != null){
+             float minDst = 0f;
+             Tile closest = null;
+@@ -552,6 +609,7 @@ public class BlockIndexer{
+     /** Find the closest ore wall relative to a position. */
+     public Tile findClosestWallOre(float xp, float yp, Item item){
+         //(stolen from foo's client :))))
++        if(world.tiles.ring) return findClosestRing(ringWallOres, xp, yp, item, true);
+         if(item.id < wallOres.length && wallOres[item.id] != null){
+             float minDst = 0f;
+             Tile closest = null;
+@@ -576,6 +634,27 @@ public class BlockIndexer{
+         return null;
+     }
+ 
++    /** Mundos en anillo: igual que la versión por matrices (compara la primera casilla de cada cuadrante), sobre los cuadrantes cargados. */
++    private @Nullable Tile findClosestRing(@Nullable RingOreIndex index, float xp, float yp, Item item, boolean wall){
++        var map = index == null ? null : index.map(item.id);
++        if(map == null) return null;
++        float minDst = 0f;
++        Tile closest = null;
++        for(IntSeq arr : map.values()){
++            if(arr.size > 0){
++                Tile tile = world.tile(arr.first());
++                if(tile != null && (tile.block() == Blocks.air) != wall){
++                    float dst = Mathf.dst2(xp, yp, tile.worldx(), tile.worldy());
++                    if(closest == null || dst < minDst){
++                        closest = tile;
++                        minDst = dst;
++                    }
++                }
++            }
++        }
++        return closest;
++    }
++
+     /** Find the closest ore block relative to a position. */
+     public Tile findClosestOre(Unit unit, Item item){
+         return findClosestOre(unit.x, unit.y, item);
+@@ -625,7 +704,7 @@ public class BlockIndexer{
+ 
+             if(tile.block().attacks && tile.build instanceof Ranged){
+                 if(data.turretTree == null){
+-                    data.turretTree = new TurretQuadtree(new Rect(0, 0, world.unitWidth(), world.unitHeight()));
++                    data.turretTree = new TurretQuadtree(world.getTreeBounds(new Rect()));
+                 }
+ 
+                 data.turretTree.insert(tile.build);
+diff --git a/core/src/mindustry/ai/Pathfinder.java b/core/src/mindustry/ai/Pathfinder.java
+index 67d937be1f3f39d29b47014a323391f7589deb5e..a3621b9b48a9bf6508af53bd06abec36fefcb273 100644
+--- a/core/src/mindustry/ai/Pathfinder.java
++++ b/core/src/mindustry/ai/Pathfinder.java
+@@ -661,7 +661,10 @@ public class Pathfinder implements Runnable{
+ 
+         @Override
+         public void getPositions(IntSeq out){
+-            out.add(world.packArray(World.toTile(position.getX()), World.toTile(position.getY())));
++            int px = World.toTile(position.getX()), py = World.toTile(position.getY());
++            //mundo en anillo: un objetivo en un chunk no cargado no tiene casilla donde sembrar el flowfield (su hueco sería el de otro chunk)
++            if(world.tiles.ring && !world.tiles.in(px, py)) return;
++            out.add(world.packArray(px, py));
+         }
+     }
+ 
+diff --git a/core/src/mindustry/ai/RingOreIndex.java b/core/src/mindustry/ai/RingOreIndex.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..704b5832342ce871571d198de32e2feed8eb18fd
+--- /dev/null
++++ b/core/src/mindustry/ai/RingOreIndex.java
+@@ -0,0 +1,71 @@
++package mindustry.ai;
++
++import arc.func.*;
++import arc.struct.*;
++import arc.util.*;
++
++/**
++ * Índice de menas de un mundo en anillo. Hace lo que las matrices {@code IntSeq[item][qx][qy]} de {@link BlockIndexer} en un mapa
++ * normal, pero con coordenadas virtuales (negativas incluidas) y sin depender del tamaño del mundo: un mapa por item, con clave
++ * de cuadrante. Los cuadrantes miden 16 casillas, alineados a los chunks de 32, así que cada cuadrante vive entero dentro de un
++ * chunk y descargarlo es quitar 4 entradas, sin buscar casilla a casilla.
++ * <p>
++ * Cada lista guarda {@code Tile.pos()} (coordenadas empaquetadas con signo), igual que en el índice normal.
++ */
++final class RingOreIndex{
++    /** Un cuadrante mide 1 << quadBits casillas; debe dividir al chunk (32). */
++    static final int quadBits = 4;
++    private static final int quadsPerChunkSide = 32 >> quadBits;
++
++    private final LongMap<IntSeq>[] byItem;
++
++    @SuppressWarnings("unchecked")
++    RingOreIndex(int items){
++        byItem = new LongMap[items];
++    }
++
++    int items(){
++        return byItem.length;
++    }
++
++    static long key(int x, int y){
++        return ((long)(x >> quadBits) << 32) | ((y >> quadBits) & 0xFFFFFFFFL);
++    }
++
++    /** @return the quadrant list of (x, y) for this item, or null if it doesn't exist and {@code create} is false (or the id is out of range). */
++    @Nullable IntSeq seq(int id, int x, int y, boolean create){
++        if(id < 0 || id >= byItem.length) return null;
++        LongMap<IntSeq> map = byItem[id];
++        if(map == null){
++            if(!create) return null;
++            map = byItem[id] = new LongMap<>();
++        }
++        long k = key(x, y);
++        IntSeq s = map.get(k);
++        if(s == null && create) map.put(k, s = new IntSeq(false, 16));
++        return s;
++    }
++
++    /** @return the quadrant lists of an item (iterate with values()); null if the item has none. */
++    @Nullable LongMap<IntSeq> map(int id){
++        return id >= 0 && id < byItem.length ? byItem[id] : null;
++    }
++
++    /** Quita todos los cuadrantes del chunk (cx, cy) de este item. @return cuántas menas tenían. */
++    int dropChunk(int id, int cx, int cy){
++        if(id < 0 || id >= byItem.length || byItem[id] == null) return 0;
++        LongMap<IntSeq> map = byItem[id];
++        int removed = 0;
++        for(int qy = 0; qy < quadsPerChunkSide; qy++){
++            for(int qx = 0; qx < quadsPerChunkSide; qx++){
++                IntSeq s = map.remove(key((cx << 5) + (qx << quadBits), (cy << 5) + (qy << quadBits)));
++                if(s != null) removed += s.size;
++            }
++        }
++        return removed;
++    }
++
++    void clear(){
++        for(int i = 0; i < byItem.length; i++) byItem[i] = null;
++    }
++}
+diff --git a/core/src/mindustry/ai/UnitGroup.java b/core/src/mindustry/ai/UnitGroup.java
+index b79fde2099a06917b2fa70ba570bce3591768c26..3953acc90dd8346f84ffe36f3ea156f453811f5d 100644
+--- a/core/src/mindustry/ai/UnitGroup.java
++++ b/core/src/mindustry/ai/UnitGroup.java
+@@ -52,7 +52,7 @@ public class UnitGroup{
+             int maxPhysicsIterations = Math.min(1 + (int)(Math.pow(units.size, 0.65) / 10), 6);
+ 
+             //yep, new allocations, because this is a new thread.
+-            IntQuadTree tree = new IntQuadTree(new Rect(0f, 0f, Vars.world.unitWidth(), Vars.world.unitHeight()),
++            IntQuadTree tree = new IntQuadTree(Vars.world.getTreeBounds(new Rect()),
+                 (index, hitbox) -> hitbox.setCentered(positions[index * 2], positions[index * 2 + 1], units.get(index).hitSize));
+             IntSeq tmpseq = new IntSeq();
+             Vec2 v1 = new Vec2();
+diff --git a/core/src/mindustry/async/AvoidanceProcess.java b/core/src/mindustry/async/AvoidanceProcess.java
+index 2a5e6728eb027440f50cb77daca722b4706d3a91..dc27c53336468b7f66dcbc58921ac1b04b3a3d9a 100644
+--- a/core/src/mindustry/async/AvoidanceProcess.java
++++ b/core/src/mindustry/async/AvoidanceProcess.java
+@@ -26,8 +26,8 @@ public class AvoidanceProcess implements AsyncProcess{
+     public @Nullable int[] getAvoidance(){
+         if(!active){
+             //lazily initialize and begin processing after this first request
+-            buffer1 = new int[wwidth * wheight];
+-            buffer2 = new int[wwidth * wheight];
++            buffer1 = new int[Vars.world.tiles.capacity()];
++            buffer2 = new int[Vars.world.tiles.capacity()];
+             active = true;
+         }
+         return avoidance;
+@@ -84,6 +84,7 @@ public class AvoidanceProcess implements AsyncProcess{
+ 
+         modified = requests.size > 0;
+ 
++        final boolean ring = Vars.world.tiles.ring;
+         int total = requests.size;
+         int[] items = requests.items;
+         for(int i = 0; i < total; i += 3){
+@@ -97,7 +98,13 @@ public class AvoidanceProcess implements AsyncProcess{
+             for(int dx = -r; dx <= r; dx++){
+                 for(int dy = -r; dy <= r; dy++){
+                     int x = dx + rx, y = dy + ry;
+-                    if(x >= 0 && y >= 0 && x < wwidth && y < wheight && (dx*dx + dy*dy) <= rad2){
++                    if((dx*dx + dy*dy) > rad2) continue;
++                    if(ring){
++                        //mundo en anillo: índice del hueco del anillo, y solo en casillas con su chunk cargado (si no, escribiría en el hueco de otro)
++                        if(!Vars.world.tiles.in(x, y)) continue;
++                        int idx = Vars.world.tiles.index(x, y);
++                        buffer[idx] = Math.max(buffer[idx], Integer.MAX_VALUE - id);
++                    }else if(x >= 0 && y >= 0 && x < wwidth && y < wheight){
+                         buffer[x + y * wwidth] = Math.max(buffer[x + y * wwidth], Integer.MAX_VALUE - id);
+                     }
+                 }
+diff --git a/core/src/mindustry/core/World.java b/core/src/mindustry/core/World.java
+index 34b8d49c964b850811c0fc36c91c51864734ea91..e8b145be66ff2b9750656eb82717d7c24920fb4e 100644
+--- a/core/src/mindustry/core/World.java
++++ b/core/src/mindustry/core/World.java
+@@ -175,8 +175,9 @@ public class World{
+         return Math.round(coord / tilesize);
+     }
+ 
++    /** Índice de la casilla (x, y) para arrays width*height (en un mundo en anillo, el del hueco del anillo). */
+     public int packArray(int x, int y){
+-        return x + y * tiles.width;
++        return tiles.index(x, y);
+     }
+ 
+     public void clearBuildings(){
+diff --git a/core/src/mindustry/entities/Fires.java b/core/src/mindustry/entities/Fires.java
+index 18a838af5e834723769d46641096b5d9dd917e01..b9a36066adb63b1d232af18e07f1ec33eeb6eda1 100644
+--- a/core/src/mindustry/entities/Fires.java
++++ b/core/src/mindustry/entities/Fires.java
+@@ -38,7 +38,7 @@ public class Fires{
+     }
+ 
+     public static @Nullable Fire get(int x, int y){
+-        return Structs.inBounds(x, y, world.width(), world.height()) ? world.tiles.getFire(world.packArray(x, y)) : null;
++        return world.tiles.in(x, y) ? world.tiles.getFire(world.packArray(x, y)) : null;
+     }
+ 
+     private static void set(Tile tile, Fire fire){
+@@ -46,7 +46,7 @@ public class Fires{
+     }
+ 
+     public static boolean has(int x, int y){
+-        if(!Structs.inBounds(x, y, world.width(), world.height())){
++        if(!world.tiles.in(x, y)){
+             return false;
+         }
+         Fire fire = get(x, y);
+diff --git a/core/src/mindustry/entities/comp/UnitComp.java b/core/src/mindustry/entities/comp/UnitComp.java
+index 0b6ce3aca874b19d0e60707f4368a3bf8d1729f1..324686daedb4858cef247ffc38329532fc5a5c9d 100644
+--- a/core/src/mindustry/entities/comp/UnitComp.java
++++ b/core/src/mindustry/entities/comp/UnitComp.java
+@@ -675,6 +675,13 @@ abstract class UnitComp implements Healthc, Physicsc, Hitboxc, Statusc, Teamc, I
+         if(type.bounded){
+             float bot = 0f, left = 0f, top = world.unitHeight(), right = world.unitWidth();
+ 
++            //mundo en anillo: los límites son todo el rango virtual de coordenadas. Con los de siempre, toda unidad en coordenadas
++            //negativas o más allá del lado del búfer se empujaría hacia (0, 0, unitWidth, unitHeight) y moriría al salir de él.
++            if(world.isRing()){
++                left = bot = mindustry.world.Tiles.minCoord * tilesize;
++                right = top = (mindustry.world.Tiles.maxCoord + 1) * tilesize;
++            }
++
+             //TODO hidden map rules only apply to player teams? should they?
+             if(state.rules.limitMapArea && !team.isAI()){
+                 bot = state.rules.limitY * tilesize;
+diff --git a/core/src/mindustry/input/MobileInput.java b/core/src/mindustry/input/MobileInput.java
+index 8154f353c2750d62a5fe1bfe9e78cf2a68c09277..7f46b514a3fccdd336cd1d317496b4d1c031c4aa 100644
+--- a/core/src/mindustry/input/MobileInput.java
++++ b/core/src/mindustry/input/MobileInput.java
+@@ -976,7 +976,13 @@ public class MobileInput extends InputHandler implements GestureListener{
+             spectating = null;
+         }
+ 
+-        camera.position.clamp(-camera.width/4f, -camera.height/4f, world.unitWidth() + camera.width/4f, world.unitHeight() + camera.height/4f);
++        if(world.isRing()){
++            //sin borde de mapa: la cámara puede ir a cualquier parte del rango virtual
++            float min = mindustry.world.Tiles.minCoord * mindustry.Vars.tilesize, max = (mindustry.world.Tiles.maxCoord + 1) * mindustry.Vars.tilesize;
++            camera.position.clamp(min - camera.width/4f, min - camera.height/4f, max + camera.width/4f, max + camera.height/4f);
++        }else{
++            camera.position.clamp(-camera.width/4f, -camera.height/4f, world.unitWidth() + camera.width/4f, world.unitHeight() + camera.height/4f);
++        }
+ 
+         return false;
+     }
+diff --git a/core/src/mindustry/logic/GlobalVars.java b/core/src/mindustry/logic/GlobalVars.java
+index 5536dee11a98745b3eb72948c1c4d238ae64d4c3..34e4c15ec638b180938cde9f5aa50c07f1b6fd6a 100644
+--- a/core/src/mindustry/logic/GlobalVars.java
++++ b/core/src/mindustry/logic/GlobalVars.java
+@@ -203,8 +203,9 @@ public class GlobalVars{
+         varWave.numval = state.wave;
+         varWaveTime.numval = state.wavetime / 60f;
+ 
+-        varMapW.numval = world.width();
+-        varMapH.numval = world.height();
++        //en un mundo en anillo width() es el lado del búfer, no el tamaño del mundo
++        varMapW.numval = world.isRing() ? mindustry.world.Tiles.maxCoord - mindustry.world.Tiles.minCoord + 1 : world.width();
++        varMapH.numval = world.isRing() ? mindustry.world.Tiles.maxCoord - mindustry.world.Tiles.minCoord + 1 : world.height();
+ 
+         //network
+         varServer.numval = (net.server() || !net.active()) ? 1 : 0;
+diff --git a/core/src/mindustry/world/blocks/distribution/Conveyor.java b/core/src/mindustry/world/blocks/distribution/Conveyor.java
+index feebf21dd352470c4b8b75af2cff4f516043999f..36fc0bfe63e3bb55ccf182301d64b63944eafa27 100644
+--- a/core/src/mindustry/world/blocks/distribution/Conveyor.java
++++ b/core/src/mindustry/world/blocks/distribution/Conveyor.java
+@@ -172,7 +172,8 @@ public class Conveyor extends Block implements Autotiler{
+                 iy = (y + Tmp.v1.y * ys[i] + Tmp.v2.y);
+ 
+                 //keep draw position deterministic.
+-                Draw.z(layer + (ix / wwidth + iy / wheight) * scaling);
++                //en un mundo en anillo las coordenadas virtuales salen de [0, unitWidth): se pliegan para que la capa no se salga de la de los bloques
++                Draw.z(layer + ((world.isRing() ? Mathf.mod(ix, wwidth) : ix) / wwidth + (world.isRing() ? Mathf.mod(iy, wheight) : iy) / wheight) * scaling);
+                 Draw.rect(item.fullIcon, ix, iy, itemSize, itemSize);
+             }
+         }
