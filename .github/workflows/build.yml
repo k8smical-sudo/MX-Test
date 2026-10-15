@@ -6,9 +6,15 @@ on:
       - '*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      # Si no hay secreto, se usa una contraseña de prueba para un keystore temporal
+      KS_PASS: ${{ secrets.KEYSTORE_PASSWORD_SECRET || 'mx-test-ci-pass' }}
 
     steps:
       - uses: actions/checkout@v7
@@ -26,17 +32,26 @@ jobs:
           build-scan-terms-of-use-url: "https://gradle.com/help/legal-terms-of-use"
           build-scan-terms-of-use-agree: "yes"
       - name: Set env
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
           git config --global user.email "ci@noreply.example.com"
           git config --global user.name "github_actions"
           echo "RELEASE_TAG=prerelease-$(date +'%Y.%m.%d').B${GITHUB_RUN_NUMBER}" | tee -a $GITHUB_ENV
           echo "RELEASE_VERSION=$(date +'%Y.%m.%d').B${GITHUB_RUN_NUMBER}" | tee -a $GITHUB_ENV
           
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | openssl enc -d -base64 -in - -out bekeystore.jks
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | openssl enc -d -base64 -in - -out bekeystore.jks
+          else
+            echo "KEYSTORE_BASE64 no definido: generando keystore temporal de prueba"
+            keytool -genkeypair -alias MindustryX -keyalg RSA -keysize 2048 -validity 10000 \
+              -storetype PKCS12 -keystore bekeystore.jks \
+              -storepass "$KS_PASS" -keypass "$KS_PASS" -dname "CN=MindustryX CI Test"
+          fi
       - name: Build
         env:
-          keystore_password: ${{ secrets.KEYSTORE_PASSWORD_SECRET }}
-          keystore_alias_password: ${{ secrets.KEYSTORE_PASSWORD_SECRET }}
+          keystore_password: ${{ env.KS_PASS }}
+          keystore_alias_password: ${{ env.KS_PASS }}
           keystore_alias: MindustryX
         run: |
           git submodule update --init --depth=10
@@ -70,5 +85,5 @@ jobs:
         run: bun run .github/actions/clearOldAssets.ts
         env:
           TOKEN: ${{secrets.GITHUB_TOKEN}}
-          REPOSITORY: TinyLake/MindustryX
+          REPOSITORY: ${{ github.repository }}
           TAG: ${{ env.RELEASE_TAG }}
