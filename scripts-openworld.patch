@@ -1,0 +1,32 @@
+--- a/scripts/applyPatches.sh	2026-10-15 03:47:01.047402706 +0000
++++ b/scripts/applyPatches.sh	2026-10-15 03:47:01.063718138 +0000
+@@ -156,5 +156,9 @@
+ commit_marker "#END-PICKED#"
+ git_am "../patches/client/*"
+ 
++#OpenWorld: parches del mundo abierto, aparte de los de MindustryX (así genPatches no los mezcla con patches/client)
++commit_marker "#END-CLIENT#"
++git_am "../patches/openworld/*"
++
+ echo "Now at $(git rev-parse HEAD)" && cd ..
+ echo -e "${GREEN}====== All Done ======${NC}"
+\ No newline at end of file
+--- a/scripts/genPatches.sh	2026-10-15 03:47:01.048856478 +0000
++++ b/scripts/genPatches.sh	2026-10-15 03:47:01.063794369 +0000
+@@ -17,5 +17,14 @@
+ rm -rf ../patches/picked/*
+ git format-patch --full-index --no-signature --zero-commit -N --ignore-blank-lines -o ../patches/picked "$base...$picked^"
+ rm -rf ../patches/client/*
+-git format-patch --full-index --no-signature --zero-commit -N --ignore-blank-lines -o ../patches/client "$picked..."
++#OpenWorld: si existe el marcador #END-CLIENT#, lo posterior son los parches del mundo abierto (patches/openworld)
++client_end=$(git log --grep "#END-CLIENT#" --format=reference | awk '{print $1}')
++if [ -n "$client_end" ]; then
++    git format-patch --full-index --no-signature --zero-commit -N --ignore-blank-lines -o ../patches/client "$picked...$client_end^"
++    rm -rf ../patches/openworld/*
++    mkdir -p ../patches/openworld
++    git format-patch --full-index --no-signature --zero-commit -N --ignore-blank-lines -o ../patches/openworld "$client_end..."
++else
++    git format-patch --full-index --no-signature --zero-commit -N --ignore-blank-lines -o ../patches/client "$picked..."
++fi
+ cd .. && git add patches
+\ No newline at end of file
