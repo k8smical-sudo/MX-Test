@@ -1,0 +1,1 @@
+package arc.math.geom; public class Point2{ public static int x(int p){ return (short)(p>>>16);} public static int y(int p){ return (short)(p&0xFFFF);} public static int pack(int x,int y){ return (x<<16)|(y&0xFFFF);} }
