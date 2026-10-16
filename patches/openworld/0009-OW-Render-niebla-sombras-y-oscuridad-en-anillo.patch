@@ -1,0 +1,502 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenWorld <openworld@example.com>
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Subject: [PATCH] OW(Render): niebla, sombras y oscuridad en modo anillo
+
+---
+ .../src/mindustry/graphics/BlockRenderer.java | 158 ++++++++++++++++--
+ core/src/mindustry/graphics/FogRenderer.java  | 122 ++++++++++++--
+ 2 files changed, 252 insertions(+), 28 deletions(-)
+
+diff --git a/core/src/mindustry/graphics/BlockRenderer.java b/core/src/mindustry/graphics/BlockRenderer.java
+index e645413..0886229 100644
+--- a/core/src/mindustry/graphics/BlockRenderer.java
++++ b/core/src/mindustry/graphics/BlockRenderer.java
+@@ -55,6 +55,8 @@ public class BlockRenderer{
+     private Seq<Building> outArray2 = new Seq<>();
+     private Seq<Tile> shadowEvents = new Seq<>();
+     private IntSet darkEvents = new IntSet();
++    //mundo en anillo: chunks (cx, cy, cx, cy...) cuyos cuadros de sombras / oscuridad hay que repintar al cargarse
++    private IntSeq ringShadowChunks = new IntSeq(), ringDarkChunks = new IntSeq();
+     private IntSet procLinks = new IntSet(), procLights = new IntSet();
+ 
+     private BlockQuadtree blockTree = new BlockQuadtree(new Rect(0, 0, 1, 1));
+@@ -95,6 +97,17 @@ public class BlockRenderer{
+             reload();
+         });
+ 
++        //mundo en anillo: un chunk entra o sale entero (en vez de 1024 TileChangeEvent)
++        Events.on(ChunkLoadEvent.class, event -> {
++            if(blockTree == null || floorTree == null || overlayTree == null) return;
++            ringLoadChunk(event.cx, event.cy);
++        });
++
++        Events.on(ChunkUnloadEvent.class, event -> {
++            if(blockTree == null || floorTree == null || overlayTree == null) return;
++            ringUnloadChunk(event.cx, event.cy);
++        });
++
+         //sometimes darkness gets disabled.
+         Events.run(Trigger.newGame, () -> {
+             if(hadMapLimit && !state.rules.limitMapArea){
+@@ -232,12 +245,86 @@ public class BlockRenderer{
+         chunk.cacheIds[layer] = cache.endCache();
+     }
+ 
++    /** Casilla del búfer: en un mundo en anillo las coordenadas virtuales se pliegan sobre el lado del anillo (potencia de 2). */
++    private static int rx(int v){
++        return world.isRing() ? v & (world.width() - 1) : v;
++    }
++
++    /** En anillo las texturas del tamaño del mundo se repiten, así cubren todas las coordenadas virtuales. */
++    private static void ringWrap(FrameBuffer buffer){
++        if(world.isRing()) buffer.getTexture().setWrap(TextureWrap.repeat, TextureWrap.repeat);
++    }
++
++    /** Límites de los índices espaciales: el mapa denso, o todo el rango de coordenadas virtuales en un mundo en anillo. */
++    private static Rect indexBounds(){
++        if(world.isRing()){
++            float pad = 16f * tilesize;
++            float min = Tiles.minCoord * tilesize - pad, size = (Tiles.maxCoord - Tiles.minCoord + 1) * tilesize + pad * 2f;
++            return new Rect(min, min, size, size);
++        }
++        return new Rect(0, 0, world.unitWidth(), world.unitHeight());
++    }
++
++    private boolean inChunk(Tile tile, int cx, int cy){
++        return tile != null && (tile.x >> Tiles.chunkBits) == cx && (tile.y >> Tiles.chunkBits) == cy;
++    }
++
++    /** Anillo: indexa de una vez las 1024 casillas del chunk recién publicado y pide repintar sus sombras y oscuridad. */
++    private void ringLoadChunk(int cx, int cy){
++        int x0 = cx << Tiles.chunkBits, y0 = cy << Tiles.chunkBits, n = Tiles.chunkSize;
++        for(int ly = 0; ly < n; ly++){
++            for(int lx = 0; lx < n; lx++){
++                Tile tile = world.tile(x0 + lx, y0 + ly);
++                if(tile == null) continue;
++
++                recordIndex(tile);
++
++                if(tile.floor().updateRender(tile)){
++                    updateFloors.add(new UpdateRenderState(tile, tile.floor()));
++                }
++
++                if(tile.overlay().updateRender(tile)){
++                    updateFloors.add(new UpdateRenderState(tile, tile.overlay()));
++                }
++            }
++        }
++
++        ringShadowChunks.add(cx);
++        ringShadowChunks.add(cy);
++        ringDarkChunks.add(cx);
++        ringDarkChunks.add(cy);
++        lastCamY = lastCamX = -99; //invalidate camera position so blocks get updated
++    }
++
++    /** Anillo: las casillas del chunk siguen existiendo en este punto; se quitan de los índices antes de que se suelte su hueco. */
++    private void ringUnloadChunk(int cx, int cy){
++        int x0 = cx << Tiles.chunkBits, y0 = cy << Tiles.chunkBits, n = Tiles.chunkSize;
++        for(int ly = 0; ly < n; ly++){
++            for(int lx = 0; lx < n; lx++){
++                Tile tile = world.tile(x0 + lx, y0 + ly);
++                if(tile == null) continue;
++
++                if(indexBlock(tile)){
++                    blockTree.remove(tile);
++                    blockLightTree.remove(tile);
++                }
++                if(indexBlockCached(tile)) blockCachedTree.remove(tile);
++                if(indexFloor(tile)) floorTree.remove(tile);
++                if(indexOverlay(tile)) overlayTree.remove(tile);
++            }
++        }
++
++        updateFloors.removeAll(u -> inChunk(u.tile, cx, cy));
++        shadowEvents.removeAll(tile -> inChunk(tile, cx, cy));
++        lastCamY = lastCamX = -99;
++    }
++
+     public void reload(){
+-        blockTree = new BlockQuadtree(new Rect(0, 0, world.unitWidth(), world.unitHeight()));
+-        blockCachedTree = new BlockQuadtree(new Rect(0, 0, world.unitWidth(), world.unitHeight()));
+-        blockLightTree = new BlockLightQuadtree(new Rect(0, 0, world.unitWidth(), world.unitHeight()));
+-        overlayTree = new OverlayQuadtree(new Rect(0, 0, world.unitWidth(), world.unitHeight()));
+-        floorTree = new FloorQuadtree(new Rect(0, 0, world.unitWidth(), world.unitHeight()));
++        blockTree = new BlockQuadtree(indexBounds());
++        blockCachedTree = new BlockQuadtree(indexBounds());
++        blockLightTree = new BlockLightQuadtree(indexBounds());
++        overlayTree = new OverlayQuadtree(indexBounds());
++        floorTree = new FloorQuadtree(indexBounds());
+ 
+         for(var arr : caches){
+             for(SpriteCache cache : arr){
+@@ -249,12 +336,15 @@ public class BlockRenderer{
+         cacheChunks = new CacheChunk[chunksx][chunksy];
+ 
+         shadowEvents.clear();
++        ringShadowChunks.clear();
++        ringDarkChunks.clear();
+         updateFloors.clear();
+         lastCamY = lastCamX = -99; //invalidate camera position so blocks get updated
+         hadMapLimit = state.rules.limitMapArea;
+ 
+         shadows.getTexture().setFilter(TextureFilter.linear, TextureFilter.linear);
+         shadows.resize(world.width(), world.height());
++        ringWrap(shadows);
+         shadows.begin(Color.white);
+         Draw.proj().setOrtho(0, 0, shadows.getWidth(), shadows.getHeight());
+ 
+@@ -276,7 +366,7 @@ public class BlockRenderer{
+             }
+ 
+             if(tile.block().displayShadow(tile) && (tile.build == null || tile.build.wasVisible)){
+-                Fill.rect(tile.x + 0.5f, tile.y + 0.5f, 1, 1);
++                Fill.rect(rx(tile.x) + 0.5f, rx(tile.y) + 0.5f, 1, 1);
+             }
+         }
+ 
+@@ -290,6 +380,7 @@ public class BlockRenderer{
+     public void updateShadows(boolean ignoreBuildings, boolean ignoreTerrain){
+         shadows.getTexture().setFilter(TextureFilter.linear, TextureFilter.linear);
+         shadows.resize(world.width(), world.height());
++        ringWrap(shadows);
+         shadows.begin(Color.white);
+         Draw.proj().setOrtho(0, 0, shadows.getWidth(), shadows.getHeight());
+ 
+@@ -297,7 +388,7 @@ public class BlockRenderer{
+ 
+         for(Tile tile : world.tiles){
+             if(tile.block().displayShadow(tile) && (tile.build == null || tile.build.wasVisible) && !(ignoreBuildings && !tile.block().isStatic()) && !(ignoreTerrain && tile.block().isStatic())){
+-                Fill.rect(tile.x + 0.5f, tile.y + 0.5f, 1, 1);
++                Fill.rect(rx(tile.x) + 0.5f, rx(tile.y) + 0.5f, 1, 1);
+             }
+         }
+ 
+@@ -310,6 +401,8 @@ public class BlockRenderer{
+         darkEvents.clear();
+         dark.getTexture().setFilter(TextureFilter.linear);
+         dark.resize(world.width(), world.height());
++        ringWrap(dark);
++        ringDarkChunks.clear();
+         //fill darkness with black when map area is limited
+         dark.begin(state.rules.limitMapArea ? Color.black : Color.white);
+ 
+@@ -332,7 +425,7 @@ public class BlockRenderer{
+             if(darkness > 0){
+                 float dark = 1f - Math.min((darkness + 0.5f) / 4f, 1f);
+                 Draw.colorl(dark);
+-                Fill.rect(tile.x + 0.5f, tile.y + 0.5f, 1, 1);
++                Fill.rect(rx(tile.x) + 0.5f, rx(tile.y) + 0.5f, 1, 1);
+             }
+         }
+ 
+@@ -423,19 +516,35 @@ public class BlockRenderer{
+     }
+ 
+     public void drawDarkness(){
+-        if(!darkEvents.isEmpty()){
++        if(!darkEvents.isEmpty() || ringDarkChunks.size > 0){
+             Draw.flush();
+ 
+             dark.begin();
+             Draw.proj().setOrtho(0, 0, dark.getWidth(), dark.getHeight());
+ 
++            //anillo: cada chunk recién cargado reescribe su cuadro entero (el hueco puede venir de otro chunk)
++            for(int i = 0; i + 1 < ringDarkChunks.size; i += 2){
++                int cx = ringDarkChunks.items[i], cy = ringDarkChunks.items[i + 1];
++                int x0 = cx << Tiles.chunkBits, y0 = cy << Tiles.chunkBits, n = Tiles.chunkSize;
++                if(!world.tiles.chunkLoaded(cx, cy)) continue;
++
++                for(int ly = 0; ly < n; ly++){
++                    for(int lx = 0; lx < n; lx++){
++                        float darkness = world.getDarkness(x0 + lx, y0 + ly);
++                        Draw.colorl(darkness <= 0f ? 1f : 1f - Math.min((darkness + 0.5f) / 4f, 1f));
++                        Fill.rect(rx(x0 + lx) + 0.5f, rx(y0 + ly) + 0.5f, 1, 1);
++                    }
++                }
++            }
++            ringDarkChunks.clear();
++
+             darkEvents.each(pos -> {
+                 var tile = world.tile(pos);
+                 if(tile == null) return;
+                 float darkness = world.getDarkness(tile.x, tile.y);
+                 //then draw the shadow
+                 Draw.colorl(darkness <= 0f ? 1f : 1f - Math.min((darkness + 0.5f) / 4f, 1f));
+-                Fill.rect(tile.x + 0.5f, tile.y + 0.5f, 1, 1);
++                Fill.rect(rx(tile.x) + 0.5f, rx(tile.y) + 0.5f, 1, 1);
+             });
+ 
+             Draw.flush();
+@@ -478,17 +587,35 @@ public class BlockRenderer{
+     }
+ 
+     public void processShadows(boolean ignoreBuildings, boolean ignoreTerrain){
+-        if(!shadowEvents.isEmpty()){
++        if(!shadowEvents.isEmpty() || ringShadowChunks.size > 0){
+             Draw.flush();
+ 
+             shadows.begin();
+             Draw.proj().setOrtho(0, 0, shadows.getWidth(), shadows.getHeight());
+ 
++            //anillo: cada chunk recién cargado reescribe su cuadro entero (blanco = sin sombra) antes de los eventos sueltos
++            for(int i = 0; i + 1 < ringShadowChunks.size; i += 2){
++                int cx = ringShadowChunks.items[i], cy = ringShadowChunks.items[i + 1];
++                int x0 = cx << Tiles.chunkBits, y0 = cy << Tiles.chunkBits, n = Tiles.chunkSize;
++                if(!world.tiles.chunkLoaded(cx, cy)) continue;
++
++                for(int ly = 0; ly < n; ly++){
++                    for(int lx = 0; lx < n; lx++){
++                        Tile tile = world.tile(x0 + lx, y0 + ly);
++                        boolean shade = tile != null && tile.block().displayShadow(tile) && (tile.build == null || tile.build.wasVisible)
++                            && !(ignoreBuildings && !tile.block().isStatic()) && !(ignoreTerrain && tile.block().isStatic());
++                        Draw.color(shade ? blendShadowColor : Color.white);
++                        Fill.rect(rx(x0 + lx) + 0.5f, rx(y0 + ly) + 0.5f, 1, 1);
++                    }
++                }
++            }
++            ringShadowChunks.clear();
++
+             for(Tile tile : shadowEvents){
+                 if(tile == null) continue;
+                 //draw white/shadow color depending on blend
+                 Draw.color((!tile.block().displayShadow(tile) || (state.rules.fog && tile.build != null && !tile.build.wasVisible) || (ignoreBuildings && !tile.block().isStatic()) || (ignoreTerrain && tile.block().isStatic())) ? Color.white : blendShadowColor);
+-                Fill.rect(tile.x + 0.5f, tile.y + 0.5f, 1, 1);
++                Fill.rect(rx(tile.x) + 0.5f, rx(tile.y) + 0.5f, 1, 1);
+             }
+ 
+             Draw.flush();
+@@ -552,6 +679,9 @@ public class BlockRenderer{
+         dirtyChunks.clear();
+ 
+         var bounds = camera.bounds(Tmp.r3).grow(tilesize * 2f);
++        //anillo: la caché de edificios (SpriteCache por chunks de 30x30 indexada con tile / 30) no admite coordenadas virtuales;
++        //todos los bloques se dibujan directos, con drawBase
++        final boolean ring = world.isRing();
+ 
+         //draw floor lights
+         floorTree.intersect(bounds, lightview::add);
+@@ -569,7 +699,7 @@ public class BlockRenderer{
+             var build = tile.build;
+             var block = tile.block();
+ 
+-            if(block.drawCached){
++            if(block.drawCached && !ring){
+                 int coords = Point2.pack(tile.x / chunkSize, tile.y / chunkSize);
+                 if(chunksToDrawSet.add(coords)){
+                     chunksToDraw.add(coords);
+@@ -580,7 +710,7 @@ public class BlockRenderer{
+                 tileWithConsumerView.add(build);
+             }
+ 
+-            if(!block.drawDynamic){
++            if(!block.drawDynamic && !ring){
+                 if(build != null) tileExtraCachedView.add(build);
+                 return;
+             }
+diff --git a/core/src/mindustry/graphics/FogRenderer.java b/core/src/mindustry/graphics/FogRenderer.java
+index f24b1d1..ead9dc0 100644
+--- a/core/src/mindustry/graphics/FogRenderer.java
++++ b/core/src/mindustry/graphics/FogRenderer.java
+@@ -21,11 +21,27 @@ public final class FogRenderer{
+     private LongSeq events = new LongSeq();
+     private Rect rect = new Rect();
+     private @Nullable Team lastTeam;
++    //mundo en anillo: la textura mide el lado del anillo y se repite (TextureWrap.repeat); cada casilla vive en (x & mask, y & mask)
++    private boolean ringWrap;
++    //chunks (cx, cy, cx, cy...) cuyo cuadro de 32x32 texels de niebla estática hay que repintar desde la CPU (cargados o descargados)
++    private IntSeq ringChunks = new IntSeq();
+ 
+     public FogRenderer(){
+         Events.on(WorldLoadEvent.class, event -> {
+             lastTeam = null;
+             events.clear();
++            ringWrap = false;
++            ringChunks.clear();
++        });
++
++        Events.on(ChunkLoadEvent.class, event -> {
++            ringChunks.add(event.cx);
++            ringChunks.add(event.cy);
++        });
++
++        Events.on(ChunkUnloadEvent.class, event -> {
++            ringChunks.add(event.cx);
++            ringChunks.add(event.cy);
+         });
+     }
+ 
+@@ -50,17 +66,28 @@ public final class FogRenderer{
+ 
+         dynamicFog.resize(world.width(), world.height());
+ 
++        final boolean ring = world.isRing();
++        if(clearStatic) ringWrap = false;
++        if(ring && !ringWrap){
++            //el anillo es potencia de 2: la textura se repite y cubre todo el mundo virtual con las mismas casillas del búfer
++            staticFog.getTexture().setWrap(TextureWrap.repeat, TextureWrap.repeat);
++            dynamicFog.getTexture().setWrap(TextureWrap.repeat, TextureWrap.repeat);
++            ringWrap = true;
++        }
++
+         if(state.rules.staticFog && player.team() != lastTeam){
+             copyFromCpu();
+             lastTeam = player.team();
+             clearStatic = false;
++            ringChunks.clear();   //la copia completa ya incluye todos los chunks
+         }
+ 
+         //draw dynamic fog every frame
+         {
+             Draw.proj(0, 0, staticFog.getWidth() * tilesize, staticFog.getHeight() * tilesize);
+             dynamicFog.begin(Color.black);
+-            ScissorStack.push(rect.set(1, 1, staticFog.getWidth() - 2, staticFog.getHeight() - 2));
++            //en anillo no hay borde que dejar sin revelar: la textura se repite
++            ScissorStack.push(ring ? rect.set(0, 0, staticFog.getWidth(), staticFog.getHeight()) : rect.set(1, 1, staticFog.getWidth() - 2, staticFog.getHeight() - 2));
+ 
+             Team team = player.team();
+ 
+@@ -78,7 +105,7 @@ public final class FogRenderer{
+         }
+ 
+         //grab static events
+-        if(state.rules.staticFog && (clearStatic || events.size > 0)){
++        if(state.rules.staticFog && (clearStatic || events.size > 0 || (ring && ringChunks.size > 0))){
+             //set projection to whole map
+             Draw.proj(0, 0, staticFog.getWidth(), staticFog.getHeight());
+ 
+@@ -89,7 +116,7 @@ public final class FogRenderer{
+                 staticFog.begin();
+             }
+ 
+-            ScissorStack.push(rect.set(1, 1, staticFog.getWidth() - 2, staticFog.getHeight() - 2));
++            ScissorStack.push(ring ? rect.set(0, 0, staticFog.getWidth(), staticFog.getHeight()) : rect.set(1, 1, staticFog.getWidth() - 2, staticFog.getHeight() - 2));
+ 
+             Draw.color(Color.white);
+ 
+@@ -99,6 +126,8 @@ public final class FogRenderer{
+             }
+             events.clear();
+ 
++            if(ring) repaintRingChunks();
++
+             staticFog.end();
+             ScissorStack.pop();
+             Draw.proj(Core.camera);
+@@ -122,17 +151,77 @@ public final class FogRenderer{
+     }
+ 
+     void poly(float x, float y, float rad){
++        if(world.isRing()){
++            float size = world.width() * tilesize;
++            ringPoly(arc.math.Mathf.mod(x, size), arc.math.Mathf.mod(y, size), rad, size);
++            return;
++        }
++        Fill.poly(x, y, 20, rad);
++    }
++
++    /** Polígono en un búfer que se repite: se dibuja también al otro lado de la costura si el círculo la cruza. x, y ya están en [0, size). */
++    private static void ringPoly(float x, float y, float rad, float size){
++        boolean l = x < rad, r = x > size - rad, b = y < rad, t = y > size - rad;
+         Fill.poly(x, y, 20, rad);
++        if(l) Fill.poly(x + size, y, 20, rad);
++        if(r) Fill.poly(x - size, y, 20, rad);
++        if(b) Fill.poly(x, y + size, 20, rad);
++        if(t) Fill.poly(x, y - size, 20, rad);
++        if(l && b) Fill.poly(x + size, y + size, 20, rad);
++        if(l && t) Fill.poly(x + size, y - size, 20, rad);
++        if(r && b) Fill.poly(x - size, y + size, 20, rad);
++        if(r && t) Fill.poly(x - size, y - size, 20, rad);
+     }
+ 
+     void renderEvent(long e){
+-        Tile tile = world.tile(FogEvent.x(e), FogEvent.y(e));
++        final boolean ring = world.isRing();
++        //FogEvent guarda x, y en 16 bits SIN signo: en anillo son coordenadas virtuales con signo
++        int ex = FogEvent.x(e), ey = FogEvent.y(e);
++        Tile tile = ring ? world.tile((short)ex, (short)ey) : world.tile(ex, ey);
+         float o = 0f;
+         //visual offset for uneven blocks; this is not reflected on the CPU, but it doesn't really matter
+         if(tile != null && tile.block().size % 2 == 0 && tile.isCenter()){
+             o = 0.5f;
+         }
+-        Fill.poly(FogEvent.x(e) + 0.5f + o, FogEvent.y(e) + 0.5f + o, 20, FogEvent.radius(e) + 0.3f);
++        if(ring){
++            int mask = world.width() - 1;
++            ringPoly((ex & mask) + 0.5f + o, (ey & mask) + 0.5f + o, FogEvent.radius(e) + 0.3f, world.width());
++            return;
++        }
++        Fill.poly(ex + 0.5f + o, ey + 0.5f + o, 20, FogEvent.radius(e) + 0.3f);
++    }
++
++    /** Anillo: borra y repinta desde la CPU el cuadro de texels de cada chunk cargado o descargado (el hueco puede venir de otro chunk). */
++    private void repaintRingChunks(){
++        var data = fogControl.getDiscovered(player.team());
++        final int ww = world.width(), mask = ww - 1, n = Tiles.chunkSize;
++
++        for(int i = 0; i + 1 < ringChunks.size; i += 2){
++            int cx = ringChunks.items[i], cy = ringChunks.items[i + 1];
++            int x0 = (cx << Tiles.chunkBits) & mask, y0 = (cy << Tiles.chunkBits) & mask;
++
++            //sin explorar
++            Draw.color(Color.black);
++            Fill.crect(x0, y0, n, n);
++            Draw.color(Color.white);
++
++            if(data == null || !world.tiles.chunkLoaded(cx, cy)) continue;
++
++            for(int ly = 0; ly < n; ly++){
++                int run = -1;
++                for(int lx = 0; lx <= n; lx++){
++                    boolean on = lx < n && data.get((y0 + ly) * ww + x0 + lx);
++                    if(on && run < 0){
++                        run = lx;
++                    }else if(!on && run >= 0){
++                        Fill.crect(x0 + run, y0 + ly, lx - run, 1);
++                        run = -1;
++                    }
++                }
++            }
++        }
++        ringChunks.clear();
++        Draw.color(Color.white);
+     }
+ 
+     public void copyFromCpu(){
+@@ -141,18 +230,23 @@ public final class FogRenderer{
+         Draw.proj(0, 0, staticFog.getWidth(), staticFog.getHeight());
+         Draw.color();
+         int ww = world.width(), wh = world.height();
++        final boolean ring = world.isRing();
+ 
+         var data = fogControl.getDiscovered(player.team());
+-        int len = world.width() * world.height();
+         if(data != null){
+-            for(int i = 0; i < len; i++){
+-                if(data.get(i)){
+-                    //TODO slow, could do scanlines instead at the very least.
+-                    int x = i % ww, y = i / ww;
+-
+-                    //manually clip with 1 pixel of padding so the borders are never fully revealed
+-                    if(x > 0 && y > 0 && x < ww - 1 && y < wh - 1){
+-                        Fill.rect(x + 0.5f, y + 0.5f, 1f, 1f);
++            //por líneas: un rectángulo por tramo explorado (antes, uno por casilla)
++            for(int y = 0; y < wh; y++){
++                int run = -1;
++                for(int x = 0; x <= ww; x++){
++                    boolean on = x < ww && data.get(y * ww + x);
++                    //manually clip with 1 pixel of padding so the borders are never fully revealed (en anillo no hay bordes)
++                    if(on && !ring && !(x > 0 && y > 0 && x < ww - 1 && y < wh - 1)) on = false;
++
++                    if(on && run < 0){
++                        run = x;
++                    }else if(!on && run >= 0){
++                        Fill.crect(run, y, x - run, 1);
++                        run = -1;
+                     }
+                 }
+             }
+-- 
+2.43.0
+
