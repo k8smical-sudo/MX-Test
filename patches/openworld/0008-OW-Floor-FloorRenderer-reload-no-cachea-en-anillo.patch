@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenWorld <openworld@example.com>
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Subject: [PATCH] OW(Floor): FloorRenderer.reload no cachea en modo anillo
+
+---
+ core/src/mindustry/graphics/FloorRenderer.java | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/core/src/mindustry/graphics/FloorRenderer.java b/core/src/mindustry/graphics/FloorRenderer.java
+index 7a4bc49..9fcdccc 100644
+--- a/core/src/mindustry/graphics/FloorRenderer.java
++++ b/core/src/mindustry/graphics/FloorRenderer.java
+@@ -361,6 +361,14 @@ public class FloorRenderer{
+             }
+         }
+ 
++        //anillo: no hay mapa denso que cachear (las casillas existen solo en los chunks publicados; world.rawTile lanzaría excepción).
++        //Con cache == null drawFloor/beginDraw/drawLayer salen al principio y recacheTile no hace nada: el suelo lo dibuja el mod por chunks.
++        if(world.isRing()){
++            cache = null;
++            dirty = null;
++            return;
++        }
++
+         int chunksx = Mathf.ceil((float)(world.width()) / chunksize), chunksy = Mathf.ceil((float)(world.height()) / chunksize);
+         cache = new ChunkMesh[chunksx][chunksy][dynamic ? 0 : CacheLayer.all.length];
+         dirty = new boolean[chunksx][chunksy];
+-- 
+2.43.0
+
