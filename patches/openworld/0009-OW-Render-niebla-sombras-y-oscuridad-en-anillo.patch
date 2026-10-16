@@ -9,10 +9,10 @@ Subject: [PATCH] OW(Render): niebla, sombras y oscuridad en modo anillo
  2 files changed, 252 insertions(+), 28 deletions(-)
 
 diff --git a/core/src/mindustry/graphics/BlockRenderer.java b/core/src/mindustry/graphics/BlockRenderer.java
-index e645413..0886229 100644
+index f6b85cb..4b1e98b 100644
 --- a/core/src/mindustry/graphics/BlockRenderer.java
 +++ b/core/src/mindustry/graphics/BlockRenderer.java
-@@ -55,6 +55,8 @@ public class BlockRenderer{
+@@ -57,6 +57,8 @@ public class BlockRenderer{
      private Seq<Building> outArray2 = new Seq<>();
      private Seq<Tile> shadowEvents = new Seq<>();
      private IntSet darkEvents = new IntSet();
@@ -21,7 +21,7 @@ index e645413..0886229 100644
      private IntSet procLinks = new IntSet(), procLights = new IntSet();
  
      private BlockQuadtree blockTree = new BlockQuadtree(new Rect(0, 0, 1, 1));
-@@ -95,6 +97,17 @@ public class BlockRenderer{
+@@ -97,6 +99,17 @@ public class BlockRenderer{
              reload();
          });
  
@@ -39,7 +39,7 @@ index e645413..0886229 100644
          //sometimes darkness gets disabled.
          Events.run(Trigger.newGame, () -> {
              if(hadMapLimit && !state.rules.limitMapArea){
-@@ -232,12 +245,86 @@ public class BlockRenderer{
+@@ -234,12 +247,86 @@ public class BlockRenderer{
          chunk.cacheIds[layer] = cache.endCache();
      }
  
@@ -131,7 +131,7 @@ index e645413..0886229 100644
  
          for(var arr : caches){
              for(SpriteCache cache : arr){
-@@ -249,12 +336,15 @@ public class BlockRenderer{
+@@ -251,12 +338,15 @@ public class BlockRenderer{
          cacheChunks = new CacheChunk[chunksx][chunksy];
  
          shadowEvents.clear();
@@ -147,7 +147,7 @@ index e645413..0886229 100644
          shadows.begin(Color.white);
          Draw.proj().setOrtho(0, 0, shadows.getWidth(), shadows.getHeight());
  
-@@ -276,7 +366,7 @@ public class BlockRenderer{
+@@ -278,7 +368,7 @@ public class BlockRenderer{
              }
  
              if(tile.block().displayShadow(tile) && (tile.build == null || tile.build.wasVisible)){
@@ -156,7 +156,7 @@ index e645413..0886229 100644
              }
          }
  
-@@ -290,6 +380,7 @@ public class BlockRenderer{
+@@ -292,6 +382,7 @@ public class BlockRenderer{
      public void updateShadows(boolean ignoreBuildings, boolean ignoreTerrain){
          shadows.getTexture().setFilter(TextureFilter.linear, TextureFilter.linear);
          shadows.resize(world.width(), world.height());
@@ -164,7 +164,7 @@ index e645413..0886229 100644
          shadows.begin(Color.white);
          Draw.proj().setOrtho(0, 0, shadows.getWidth(), shadows.getHeight());
  
-@@ -297,7 +388,7 @@ public class BlockRenderer{
+@@ -299,7 +390,7 @@ public class BlockRenderer{
  
          for(Tile tile : world.tiles){
              if(tile.block().displayShadow(tile) && (tile.build == null || tile.build.wasVisible) && !(ignoreBuildings && !tile.block().isStatic()) && !(ignoreTerrain && tile.block().isStatic())){
@@ -173,7 +173,7 @@ index e645413..0886229 100644
              }
          }
  
-@@ -310,6 +401,8 @@ public class BlockRenderer{
+@@ -312,6 +403,8 @@ public class BlockRenderer{
          darkEvents.clear();
          dark.getTexture().setFilter(TextureFilter.linear);
          dark.resize(world.width(), world.height());
@@ -182,7 +182,7 @@ index e645413..0886229 100644
          //fill darkness with black when map area is limited
          dark.begin(state.rules.limitMapArea ? Color.black : Color.white);
  
-@@ -332,7 +425,7 @@ public class BlockRenderer{
+@@ -334,7 +427,7 @@ public class BlockRenderer{
              if(darkness > 0){
                  float dark = 1f - Math.min((darkness + 0.5f) / 4f, 1f);
                  Draw.colorl(dark);
@@ -191,7 +191,7 @@ index e645413..0886229 100644
              }
          }
  
-@@ -423,19 +516,35 @@ public class BlockRenderer{
+@@ -425,19 +518,35 @@ public class BlockRenderer{
      }
  
      public void drawDarkness(){
@@ -229,7 +229,7 @@ index e645413..0886229 100644
              });
  
              Draw.flush();
-@@ -478,17 +587,35 @@ public class BlockRenderer{
+@@ -480,17 +589,35 @@ public class BlockRenderer{
      }
  
      public void processShadows(boolean ignoreBuildings, boolean ignoreTerrain){
@@ -267,7 +267,7 @@ index e645413..0886229 100644
              }
  
              Draw.flush();
-@@ -552,6 +679,9 @@ public class BlockRenderer{
+@@ -554,6 +681,9 @@ public class BlockRenderer{
          dirtyChunks.clear();
  
          var bounds = camera.bounds(Tmp.r3).grow(tilesize * 2f);
@@ -277,16 +277,16 @@ index e645413..0886229 100644
  
          //draw floor lights
          floorTree.intersect(bounds, lightview::add);
-@@ -569,7 +699,7 @@ public class BlockRenderer{
+@@ -571,7 +701,7 @@ public class BlockRenderer{
              var build = tile.build;
              var block = tile.block();
  
--            if(block.drawCached){
-+            if(block.drawCached && !ring){
+-            if(block.drawCached && RenderExt.blockRenderLevel > 1){
++            if(block.drawCached && RenderExt.blockRenderLevel > 1 && !ring){
                  int coords = Point2.pack(tile.x / chunkSize, tile.y / chunkSize);
                  if(chunksToDrawSet.add(coords)){
                      chunksToDraw.add(coords);
-@@ -580,7 +710,7 @@ public class BlockRenderer{
+@@ -582,7 +712,7 @@ public class BlockRenderer{
                  tileWithConsumerView.add(build);
              }
  
