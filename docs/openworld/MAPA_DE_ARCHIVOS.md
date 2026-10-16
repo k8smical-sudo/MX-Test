@@ -65,5 +65,11 @@ OW(Floor): FloorRenderer.reload no cachea en modo anillo
 
 - `core/src/mindustry/graphics/FloorRenderer.java`
 
+## `0009-OW-Render-niebla-sombras-y-oscuridad-en-anillo.patch`
+OW(Render): niebla, sombras y oscuridad en modo anillo
+
+- `core/src/mindustry/graphics/BlockRenderer.java`
+- `core/src/mindustry/graphics/FogRenderer.java`
+
 ---
-Total: 19 archivos distintos del motor.
+Total: 21 archivos distintos del motor.
