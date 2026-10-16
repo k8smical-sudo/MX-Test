@@ -60,5 +60,10 @@ OW(Core): limites de unidades y camara, menas por chunk y sistemas pequenos
 - `core/src/mindustry/logic/GlobalVars.java`
 - `core/src/mindustry/world/blocks/distribution/Conveyor.java`
 
+## `0008-OW-Floor-FloorRenderer-reload-no-cachea-en-anillo.patch`
+OW(Floor): FloorRenderer.reload no cachea en modo anillo
+
+- `core/src/mindustry/graphics/FloorRenderer.java`
+
 ---
-Total: 18 archivos distintos del motor.
+Total: 19 archivos distintos del motor.
