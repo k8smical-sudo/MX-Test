@@ -1,0 +1,65 @@
+From 75e31cada7adf1bcf3711d9b45be875d208d5a7e Mon Sep 17 00:00:00 2001
+From: K8 <k8@example.com>
+Date: Sat, 17 Oct 2026 14:07:20 +0000
+Subject: [PATCH] OW(Render): reafirma TextureWrap.repeat de sombras, oscuridad
+ y niebla en anillo
+
+FrameBuffer.resize() recrea la textura y solo restaura el filtro, no el modo de
+repeticion: tras cualquier resize o reconstruccion del FBO volvia a clampToEdge y,
+pasada la costura del anillo (~1024 casillas), se estiraba la ultima fila de
+sombras/oscuridad/niebla. Ahora se reafirma en drawShadows, drawDarkness y drawFog
+(setWrap no toca la GPU si ya coincide).
+---
+ core/src/mindustry/graphics/BlockRenderer.java | 3 +++
+ core/src/mindustry/graphics/FogRenderer.java   | 7 +++++--
+ 2 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/core/src/mindustry/graphics/BlockRenderer.java b/core/src/mindustry/graphics/BlockRenderer.java
+index 7cce423..dd10abb 100644
+--- a/core/src/mindustry/graphics/BlockRenderer.java
++++ b/core/src/mindustry/graphics/BlockRenderer.java
+@@ -518,6 +518,8 @@ public class BlockRenderer{
+     }
+ 
+     public void drawDarkness(){
++        //anillo: FrameBuffer.resize() recrea la textura y pierde el modo de repetición; setWrap solo toca la GPU si cambió
++        ringWrap(dark);
+         if(!darkEvents.isEmpty() || ringDarkChunks.size > 0){
+             Draw.flush();
+ 
+@@ -631,6 +633,7 @@ public class BlockRenderer{
+ 
+     public void drawShadows(){
+         processShadows();
++        ringWrap(shadows);
+ 
+         float ww = world.width() * tilesize, wh = world.height() * tilesize;
+         float x = camera.position.x + tilesize / 2f, y = camera.position.y + tilesize / 2f;
+diff --git a/core/src/mindustry/graphics/FogRenderer.java b/core/src/mindustry/graphics/FogRenderer.java
+index ead9dc0..201e747 100644
+--- a/core/src/mindustry/graphics/FogRenderer.java
++++ b/core/src/mindustry/graphics/FogRenderer.java
+@@ -68,8 +68,10 @@ public final class FogRenderer{
+ 
+         final boolean ring = world.isRing();
+         if(clearStatic) ringWrap = false;
+-        if(ring && !ringWrap){
+-            //el anillo es potencia de 2: la textura se repite y cubre todo el mundo virtual con las mismas casillas del búfer
++        if(ring){
++            //el anillo es potencia de 2: la textura se repite y cubre todo el mundo virtual con las mismas casillas del búfer.
++            //Se reafirma en cada fotograma: FrameBuffer.resize() / la reconstrucción tras perder el contexto GL recrean la textura con
++            //clampToEdge, y pasada la costura del anillo (~1024 casillas) la última fila se estiraría. setWrap no hace nada si ya coincide.
+             staticFog.getTexture().setWrap(TextureWrap.repeat, TextureWrap.repeat);
+             dynamicFog.getTexture().setWrap(TextureWrap.repeat, TextureWrap.repeat);
+             ringWrap = true;
+@@ -226,6 +228,7 @@ public final class FogRenderer{
+ 
+     public void copyFromCpu(){
+         staticFog.resize(world.width(), world.height());
++        if(world.isRing()) staticFog.getTexture().setWrap(TextureWrap.repeat, TextureWrap.repeat);
+         staticFog.begin(Color.black);
+         Draw.proj(0, 0, staticFog.getWidth(), staticFog.getHeight());
+         Draw.color();
+-- 
+2.43.0
+
