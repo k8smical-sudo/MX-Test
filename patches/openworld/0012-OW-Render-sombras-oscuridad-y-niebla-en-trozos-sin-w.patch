@@ -1,0 +1,260 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenWorld <openworld@example.com>
+Date: Sat, 17 Oct 2026 15:00:55 +0000
+Subject: [PATCH] OW(Render): sombras, oscuridad y niebla en trozos sin wrap,
+ limpieza al descargar y StaticWall.eq en anillo
+
+- RingFbo: dibuja las texturas del tamano del anillo partiendo la pantalla en las costuras; UV siempre en [0,1], no depende de TextureWrap.repeat.
+- BlockRenderer: al descargar un chunk se blanquea su cuadro de sombras y de oscuridad (antes quedaban sombras fantasma de edificios quitados, y la oscuridad vieja se sumaba a la que el mod hornea en los chunks no cargados).
+- StaticWall.eq: en anillo ya no compara con world.width() (toda casilla >= 1023 perdia el patron grande) y tolera chunks no cargados.
+---
+ .../src/mindustry/graphics/BlockRenderer.java | 65 +++++++++++++++----
+ core/src/mindustry/graphics/FogRenderer.java  | 13 +++-
+ core/src/mindustry/graphics/RingFbo.java      | 61 +++++++++++++++++
+ .../world/blocks/environment/StaticWall.java  |  7 ++
+ 4 files changed, 131 insertions(+), 15 deletions(-)
+ create mode 100644 core/src/mindustry/graphics/RingFbo.java
+
+diff --git a/core/src/mindustry/graphics/BlockRenderer.java b/core/src/mindustry/graphics/BlockRenderer.java
+index dd10abbbf3e5e4503ce57040a0b3a81806b84500..d7e7c55bccaef1ccae6e73fbd3d7a13b49252eb6 100644
+--- a/core/src/mindustry/graphics/BlockRenderer.java
++++ b/core/src/mindustry/graphics/BlockRenderer.java
+@@ -59,6 +59,9 @@ public class BlockRenderer{
+     private IntSet darkEvents = new IntSet();
+     //mundo en anillo: chunks (cx, cy, cx, cy...) cuyos cuadros de sombras / oscuridad hay que repintar al cargarse
+     private IntSeq ringShadowChunks = new IntSeq(), ringDarkChunks = new IntSeq();
++    //mundo en anillo: chunks descargados cuyo cuadro de sombras / oscuridad hay que BLANQUEAR (si no, quedan sombras fantasma de edificios
++    //quitados al descargar, y la oscuridad vieja se suma a la que el mod hornea en la malla de los chunks no cargados)
++    private IntSeq ringClearShadow = new IntSeq(), ringClearDark = new IntSeq();
+     private IntSet procLinks = new IntSet(), procLights = new IntSet();
+ 
+     private BlockQuadtree blockTree = new BlockQuadtree(new Rect(0, 0, 1, 1));
+@@ -318,6 +321,12 @@ public class BlockRenderer{
+ 
+         updateFloors.removeAll(u -> inChunk(u.tile, cx, cy));
+         shadowEvents.removeAll(tile -> inChunk(tile, cx, cy));
++
++        //los eventos de arriba se descartan: el cuadro de texels del chunk se blanquea entero en el siguiente fotograma
++        ringClearShadow.add(cx);
++        ringClearShadow.add(cy);
++        ringClearDark.add(cx);
++        ringClearDark.add(cy);
+         lastCamY = lastCamX = -99;
+     }
+ 
+@@ -340,6 +349,8 @@ public class BlockRenderer{
+         shadowEvents.clear();
+         ringShadowChunks.clear();
+         ringDarkChunks.clear();
++        ringClearShadow.clear();
++        ringClearDark.clear();
+         updateFloors.clear();
+         lastCamY = lastCamX = -99; //invalidate camera position so blocks get updated
+         hadMapLimit = state.rules.limitMapArea;
+@@ -520,12 +531,21 @@ public class BlockRenderer{
+     public void drawDarkness(){
+         //anillo: FrameBuffer.resize() recrea la textura y pierde el modo de repetición; setWrap solo toca la GPU si cambió
+         ringWrap(dark);
+-        if(!darkEvents.isEmpty() || ringDarkChunks.size > 0){
++        if(!darkEvents.isEmpty() || ringDarkChunks.size > 0 || ringClearDark.size > 0){
+             Draw.flush();
+ 
+             dark.begin();
+             Draw.proj().setOrtho(0, 0, dark.getWidth(), dark.getHeight());
+ 
++            //anillo: primero se blanquean los chunks descargados (sin oscuridad del motor), luego se repintan los recién cargados
++            if(ringClearDark.size > 0){
++                Draw.colorl(1f);
++                for(int i = 0; i + 1 < ringClearDark.size; i += 2){
++                    Fill.crect(rx(ringClearDark.items[i] << Tiles.chunkBits), rx(ringClearDark.items[i + 1] << Tiles.chunkBits), Tiles.chunkSize, Tiles.chunkSize);
++                }
++                ringClearDark.clear();
++            }
++
+             //anillo: cada chunk recién cargado reescribe su cuadro entero (el hueco puede venir de otro chunk)
+             for(int i = 0; i + 1 < ringDarkChunks.size; i += 2){
+                 int cx = ringDarkChunks.items[i], cy = ringDarkChunks.items[i + 1];
+@@ -560,7 +580,12 @@ public class BlockRenderer{
+         }
+ 
+         Draw.shader(Shaders.darkness);
+-        Draw.fbo(dark.getTexture(), world.width(), world.height(), tilesize, tilesize/2f);
++        if(world.isRing()){
++            //anillo: la textura se dibuja en trozos con UV dentro de [0, 1] (no depende de TextureWrap.repeat ni de UV enormes)
++            RingFbo.draw(dark.getTexture(), world.width(), tilesize, tilesize / 2f);
++        }else{
++            Draw.fbo(dark.getTexture(), world.width(), world.height(), tilesize, tilesize/2f);
++        }
+         Draw.shader();
+     }
+ 
+@@ -591,12 +616,21 @@ public class BlockRenderer{
+     }
+ 
+     public void processShadows(boolean ignoreBuildings, boolean ignoreTerrain){
+-        if(!shadowEvents.isEmpty() || ringShadowChunks.size > 0){
++        if(!shadowEvents.isEmpty() || ringShadowChunks.size > 0 || ringClearShadow.size > 0){
+             Draw.flush();
+ 
+             shadows.begin();
+             Draw.proj().setOrtho(0, 0, shadows.getWidth(), shadows.getHeight());
+ 
++            //anillo: primero se blanquean los chunks descargados (blanco = sin sombra), luego se repintan los recién cargados
++            if(ringClearShadow.size > 0){
++                Draw.color(Color.white);
++                for(int i = 0; i + 1 < ringClearShadow.size; i += 2){
++                    Fill.crect(rx(ringClearShadow.items[i] << Tiles.chunkBits), rx(ringClearShadow.items[i + 1] << Tiles.chunkBits), Tiles.chunkSize, Tiles.chunkSize);
++                }
++                ringClearShadow.clear();
++            }
++
+             //anillo: cada chunk recién cargado reescribe su cuadro entero (blanco = sin sombra) antes de los eventos sueltos
+             for(int i = 0; i + 1 < ringShadowChunks.size; i += 2){
+                 int cx = ringShadowChunks.items[i], cy = ringShadowChunks.items[i + 1];
+@@ -635,18 +669,23 @@ public class BlockRenderer{
+         processShadows();
+         ringWrap(shadows);
+ 
+-        float ww = world.width() * tilesize, wh = world.height() * tilesize;
+-        float x = camera.position.x + tilesize / 2f, y = camera.position.y + tilesize / 2f;
+-        float u = (x - camera.width / 2f) / ww,
+-        v = (y - camera.height / 2f) / wh,
+-        u2 = (x + camera.width / 2f) / ww,
+-        v2 = (y + camera.height / 2f) / wh;
++        Draw.shader(Shaders.darkness);
++        if(world.isRing()){
++            //anillo: la textura se dibuja en trozos con UV dentro de [0, 1] (no depende de TextureWrap.repeat ni de UV enormes)
++            RingFbo.draw(shadows.getTexture(), world.width(), tilesize, tilesize / 2f);
++        }else{
++            float ww = world.width() * tilesize, wh = world.height() * tilesize;
++            float x = camera.position.x + tilesize / 2f, y = camera.position.y + tilesize / 2f;
++            float u = (x - camera.width / 2f) / ww,
++            v = (y - camera.height / 2f) / wh,
++            u2 = (x + camera.width / 2f) / ww,
++            v2 = (y + camera.height / 2f) / wh;
+ 
+-        Tmp.tr1.set(shadows.getTexture());
+-        Tmp.tr1.set(u, v2, u2, v);
++            Tmp.tr1.set(shadows.getTexture());
++            Tmp.tr1.set(u, v2, u2, v);
+ 
+-        Draw.shader(Shaders.darkness);
+-        Draw.rect(Tmp.tr1, camera.position.x, camera.position.y, camera.width, camera.height);
++            Draw.rect(Tmp.tr1, camera.position.x, camera.position.y, camera.width, camera.height);
++        }
+         Draw.shader();
+     }
+ 
+diff --git a/core/src/mindustry/graphics/FogRenderer.java b/core/src/mindustry/graphics/FogRenderer.java
+index 201e747c94d18deb9c37933da872cb9e6da14230..8d27eee7cd98d094f3d7a95160c8f95d2743807b 100644
+--- a/core/src/mindustry/graphics/FogRenderer.java
++++ b/core/src/mindustry/graphics/FogRenderer.java
+@@ -142,12 +142,21 @@ public final class FogRenderer{
+ 
+         Draw.shader(Shaders.fog);
+         Draw.color(state.rules.dynamicColor, Float.isNaN(state.rules.dynamicColor.a) ? 0.5f : Math.max(0.5f, state.rules.dynamicColor.a));
+-        Draw.fbo(dynamicFog.getTexture(), world.width(), world.height(), tilesize);
++        //anillo: la textura se dibuja en trozos con UV dentro de [0, 1] (no depende de TextureWrap.repeat ni de UV enormes)
++        if(world.isRing()){
++            RingFbo.draw(dynamicFog.getTexture(), world.width(), tilesize, 0f);
++        }else{
++            Draw.fbo(dynamicFog.getTexture(), world.width(), world.height(), tilesize);
++        }
+         //TODO ai check?
+         if(state.rules.staticFog){
+             //TODO why does this require a half-tile offset while dynamic does not
+             Draw.color(state.rules.staticColor, 1f);
+-            Draw.fbo(staticFog.getTexture(), world.width(), world.height(), tilesize, tilesize/2f);
++            if(world.isRing()){
++                RingFbo.draw(staticFog.getTexture(), world.width(), tilesize, tilesize / 2f);
++            }else{
++                Draw.fbo(staticFog.getTexture(), world.width(), world.height(), tilesize, tilesize/2f);
++            }
+         }
+         Draw.shader();
+     }
+diff --git a/core/src/mindustry/graphics/RingFbo.java b/core/src/mindustry/graphics/RingFbo.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..8c80ad39234ede626e65bc955f8a1a1f383b3617
+--- /dev/null
++++ b/core/src/mindustry/graphics/RingFbo.java
+@@ -0,0 +1,61 @@
++package mindustry.graphics;
++
++import arc.*;
++import arc.graphics.*;
++import arc.graphics.g2d.*;
++
++/**
++ * Dibuja sobre la pantalla una textura "del tamaño del mundo" (sombras, oscuridad, niebla) cuando el mundo es un ANILLO.
++ *
++ * {@code Draw.fbo} dibuja UN rectángulo cuya coordenada de textura es (posición de la cámara) / (lado del mundo): en un mundo
++ * en anillo esa coordenada crece sin límite (cámara en la casilla 30 000 -> u ~ 29) y el resultado solo es correcto si la textura
++ * está en {@code TextureWrap.repeat}. Ese modo se pierde con cada {@code FrameBuffer.resize()} / reconstrucción del contexto GL, y
++ * con UV grandes además se pierde precisión en la interpolación. Aquí no se depende de nada de eso: la pantalla se parte en las
++ * costuras del anillo y cada trozo se dibuja con UV siempre dentro de [0, 1] (como mucho 4 trozos). Es la misma imagen.
++ */
++final class RingFbo{
++    private static final TextureRegion region = new TextureRegion();
++
++    private RingFbo(){}
++
++    /**
++     * @param texture textura de lado {@code sideTiles} casillas (una casilla = un texel), voltereada como los FrameBuffer de Arc
++     * @param offset desplazamiento en unidades de mundo entre la cámara y el espacio de la textura (media casilla en sombras,
++     * oscuridad y niebla estática; 0 en niebla dinámica), el mismo que recibe {@code Draw.fbo}
++     */
++    static void draw(Texture texture, int sideTiles, int tilesize, float offset){
++        final Camera cam = Core.camera;
++        final double side = (double)sideTiles * tilesize;
++        final double halfW = cam.width / 2.0, halfH = cam.height / 2.0;
++        //espacio de la textura: es el del mundo desplazado por 'offset'
++        final double left = cam.position.x + (double)offset - halfW, right = cam.position.x + (double)offset + halfW;
++        final double bottom = cam.position.y + (double)offset - halfH, top = cam.position.y + (double)offset + halfH;
++
++        final long kx0 = (long)Math.floor(left / side), kx1 = (long)Math.floor(Math.nextDown(right) / side);
++        final long ky0 = (long)Math.floor(bottom / side), ky1 = (long)Math.floor(Math.nextDown(top) / side);
++        //tope de seguridad (una cámara absurdamente alejada): más de 8 x 8 trozos no tiene sentido
++        if(kx1 - kx0 > 8 || ky1 - ky0 > 8) return;
++
++        region.texture = texture;
++        for(long ky = ky0; ky <= ky1; ky++){
++            final double cellBottom = ky * side;
++            final double b = Math.max(bottom, cellBottom), t = Math.min(top, cellBottom + side);
++            if(t - b <= 1e-4) continue;
++            for(long kx = kx0; kx <= kx1; kx++){
++                final double cellLeft = kx * side;
++                final double a = Math.max(left, cellLeft), c = Math.min(right, cellLeft + side);
++                if(c - a <= 1e-4) continue;
++
++                final float u = (float)((a - cellLeft) / side), u2 = (float)((c - cellLeft) / side);
++                final float v = (float)((b - cellBottom) / side), v2 = (float)((t - cellBottom) / side);
++                //mismo volteo vertical que Draw.fbo: (u, v2) arriba-izquierda, (u2, v) abajo-derecha
++                region.set(u, v2, u2, v);
++
++                //destino en coordenadas de mundo (se quita el desplazamiento): el trozo cae justo donde estaba en el rectángulo único
++                final float w = (float)(c - a), h = (float)(t - b);
++                final float x = (float)((a + c) * 0.5 - offset), y = (float)((b + t) * 0.5 - offset);
++                Draw.rect(region, x, y, w, h);
++            }
++        }
++    }
++}
+diff --git a/core/src/mindustry/world/blocks/environment/StaticWall.java b/core/src/mindustry/world/blocks/environment/StaticWall.java
+index 06b7be64bcd37d6877c60144968f547d28aef3a4..1f67826ebcccb74c45978a419008f8cac846d639 100644
+--- a/core/src/mindustry/world/blocks/environment/StaticWall.java
++++ b/core/src/mindustry/world/blocks/environment/StaticWall.java
+@@ -111,6 +111,13 @@ public class StaticWall extends Prop{
+     }
+ 
+     boolean eq(int rx, int ry){
++        //anillo: world.width() es el lado del búfer, no el borde del mundo (con él, toda casilla virtual >= 1023 perdía el patrón grande),
++        //y una casilla de un chunk no cargado es null
++        if(world.isRing()){
++            Tile a = world.tile(rx, ry), b = world.tile(rx + 1, ry), c = world.tile(rx, ry + 1), d = world.tile(rx + 1, ry + 1);
++            return a != null && b != null && c != null && d != null
++                && a.block() == this && b.block() == this && c.block() == this && d.block() == this;
++        }
+         return rx < world.width() - 1 && ry < world.height() - 1
+             && world.tile(rx + 1, ry).block() == this
+             && world.tile(rx, ry + 1).block() == this
