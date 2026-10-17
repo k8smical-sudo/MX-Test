@@ -71,5 +71,11 @@ OW(Render): niebla, sombras y oscuridad en modo anillo
 - `core/src/mindustry/graphics/BlockRenderer.java`
 - `core/src/mindustry/graphics/FogRenderer.java`
 
+## `0010-OW-Combate-balas-y-explosiones-con-coordenadas-virtuales.patch`
+OW(Combate): balas y explosiones funcionan con coordenadas virtuales del anillo
+
+- `core/src/mindustry/entities/Damage.java`
+- `core/src/mindustry/entities/comp/BulletComp.java`
+
 ---
-Total: 21 archivos distintos del motor.
+Total: 23 archivos distintos del motor.
