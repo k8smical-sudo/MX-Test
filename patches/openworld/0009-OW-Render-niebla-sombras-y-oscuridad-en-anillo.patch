@@ -4,12 +4,12 @@ Date: Mon, 1 Jan 2024 00:00:00 +0000
 Subject: [PATCH] OW(Render): niebla, sombras y oscuridad en modo anillo
 
 ---
- .../src/mindustry/graphics/BlockRenderer.java | 158 ++++++++++++++++--
- core/src/mindustry/graphics/FogRenderer.java  | 122 ++++++++++++--
- 2 files changed, 252 insertions(+), 28 deletions(-)
+ .../src/mindustry/graphics/BlockRenderer.java | 161 ++++++++++++++++--
+ core/src/mindustry/graphics/FogRenderer.java  | 122 +++++++++++--
+ 2 files changed, 255 insertions(+), 28 deletions(-)
 
 diff --git a/core/src/mindustry/graphics/BlockRenderer.java b/core/src/mindustry/graphics/BlockRenderer.java
-index f6b85cb..4b1e98b 100644
+index f6b85cb..7cce423 100644
 --- a/core/src/mindustry/graphics/BlockRenderer.java
 +++ b/core/src/mindustry/graphics/BlockRenderer.java
 @@ -57,6 +57,8 @@ public class BlockRenderer{
@@ -277,7 +277,13 @@ index f6b85cb..4b1e98b 100644
  
          //draw floor lights
          floorTree.intersect(bounds, lightview::add);
-@@ -571,7 +701,7 @@ public class BlockRenderer{
+@@ -568,10 +698,13 @@ public class BlockRenderer{
+         Team pteam = player.team();
+ 
+         blockTree.intersect(bounds, tile -> {
++            //anillo: un bloque cuyo chunk ya no está cargado no se dibuja (su casilla ya no existe aunque el índice aún la recuerde)
++            if(ring && !world.tiles.chunkLoaded(tile.x >> Tiles.chunkBits, tile.y >> Tiles.chunkBits)) return;
++
              var build = tile.build;
              var block = tile.block();
  
@@ -286,7 +292,7 @@ index f6b85cb..4b1e98b 100644
                  int coords = Point2.pack(tile.x / chunkSize, tile.y / chunkSize);
                  if(chunksToDrawSet.add(coords)){
                      chunksToDraw.add(coords);
-@@ -582,7 +712,7 @@ public class BlockRenderer{
+@@ -582,7 +715,7 @@ public class BlockRenderer{
                  tileWithConsumerView.add(build);
              }
  
