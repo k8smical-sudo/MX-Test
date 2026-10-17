@@ -79,3 +79,11 @@ OW(Combate): balas y explosiones funcionan con coordenadas virtuales del anillo
 
 ---
 Total: 23 archivos distintos del motor.
+
+## `0012-OW-Render-sombras-oscuridad-y-niebla-en-trozos-sin-w.patch`
+OW(Render): sombras, oscuridad y niebla en trozos sin wrap, limpieza al descargar y StaticWall.eq en anillo
+
+- `core/src/mindustry/graphics/RingFbo.java` — NUEVO
+- `core/src/mindustry/graphics/BlockRenderer.java` — MX
+- `core/src/mindustry/graphics/FogRenderer.java`
+- `core/src/mindustry/world/blocks/environment/StaticWall.java`
