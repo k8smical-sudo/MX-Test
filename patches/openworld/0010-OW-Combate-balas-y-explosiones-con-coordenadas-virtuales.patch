@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenWorld <openworld@example.com>
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Subject: [PATCH] OW(Combate): balas y explosiones funcionan con coordenadas
+ virtuales del anillo
+
+---
+ core/src/mindustry/entities/Damage.java          | 3 ++-
+ core/src/mindustry/entities/comp/BulletComp.java | 4 ++--
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/core/src/mindustry/entities/Damage.java b/core/src/mindustry/entities/Damage.java
+index c849d13..c3ff6e2 100644
+--- a/core/src/mindustry/entities/Damage.java
++++ b/core/src/mindustry/entities/Damage.java
+@@ -563,7 +563,8 @@ public class Damage{
+ 
+     public static void tileDamage(Team team, int tx, int ty, float baseRadius, float damage, @Nullable Bullet source){
+         Time.run(0f, () -> {
+-            int x = Mathf.clamp(tx, -100, world.width() + 100), y = Mathf.clamp(ty, -100, world.height() + 100);
++            //en anillo no se recorta: las coordenadas virtuales no están limitadas por el lado del anillo
++            int x = world.isRing() ? tx : Mathf.clamp(tx, -100, world.width() + 100), y = world.isRing() ? ty : Mathf.clamp(ty, -100, world.height() + 100);
+ 
+             var in = world.build(x, y);
+             //spawned inside a multiblock. this means that damage needs to be dealt directly.
+diff --git a/core/src/mindustry/entities/comp/BulletComp.java b/core/src/mindustry/entities/comp/BulletComp.java
+index bcc0833..081628c 100644
+--- a/core/src/mindustry/entities/comp/BulletComp.java
++++ b/core/src/mindustry/entities/comp/BulletComp.java
+@@ -230,9 +230,9 @@ abstract class BulletComp implements Timedc, Damagec, Hitboxc, Teamc, Posc, Draw
+         int x = x1, dx = Math.abs(x2 - x), sx = x < x2 ? 1 : -1;
+         int y = y1, dy = Math.abs(y2 - y), sy = y < y2 ? 1 : -1;
+         int e2, err = dx - dy;
+-        int ww = world.width(), wh = world.height();
+ 
+-        while(x >= 0 && y >= 0 && x < ww && y < wh){
++        //en un mundo en anillo las coordenadas son virtuales (pueden ser negativas o mayores que el lado del anillo): Tiles.in conoce el rango
++        while(world.tiles.in(x, y)){
+             Building build = world.build(x, y);
+ 
+             if(type.collideFloor || type.collideTerrain){
+-- 
+2.43.0
+
