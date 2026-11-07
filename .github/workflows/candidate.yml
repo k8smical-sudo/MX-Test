@@ -1,0 +1,86 @@
+name: MX candidate
+
+# Cada PR compila el motor y lo publica como prerelease "candidate-<sha>".
+# Después dispara la compatibilidad del mod contra ese candidato. El mod responde
+# con un commit status "mod-compat" en el commit del PR.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  statuses: read
+
+concurrency:
+  group: candidate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  candidate:
+    # Solo PRs del propio repo: los PRs de forks no reciben secretos.
+    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: 8.12
+          cache-read-only: true
+
+      - name: Set env
+        run: |
+          git config --global user.email "ci@noreply.example.com"
+          git config --global user.name "github_actions"
+
+      - name: Prepare sources
+        run: |
+          git submodule update --init --depth=10
+          ./scripts/applyPatches.sh
+
+      - name: Build desktop distribution
+        working-directory: work
+        run: ./gradlew --parallel desktop:dist
+
+      - name: Publicar candidato
+        run: |
+          TAG="candidate-${SHA:0:12}"
+          JAR="MindustryX-${TAG}-Desktop.jar"
+          cp work/desktop/build/libs/Mindustry.jar "$JAR"
+          gh release create "$TAG" "$JAR" --repo "$GITHUB_REPOSITORY" --prerelease \
+            --target "$SHA" --title "$TAG" \
+            --notes "Candidato de prueba para el mod (PR #${{ github.event.pull_request.number }}). No es una release estable." \
+            || gh release upload "$TAG" "$JAR" --repo "$GITHUB_REPOSITORY" --clobber
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Limpiar candidatos antiguos
+        run: |
+          # Conserva los 5 candidatos más recientes; borra el resto.
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName \
+            -q '.[] | select(.tagName | startswith("candidate-")) | .tagName' \
+            | tail -n +6 | while read -r old; do
+              gh release delete "$old" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+            done
+
+      - name: Disparar compatibilidad del mod
+        env:
+          MOD_TOKEN: ${{ secrets.MOD_DISPATCH_TOKEN }}
+        run: |
+          # El token debe poder disparar repository_dispatch en el repo del mod.
+          GH_TOKEN="$MOD_TOKEN" gh api repos/k8smical-sudo/MindustryOpenWorldTest/dispatches \
+            -f event_type=mx-candidate \
+            -F client_payload[tag]="$TAG" \
+            -F client_payload[sha]="$SHA" \
+            -F client_payload[mx_repo]="$GITHUB_REPOSITORY"
