@@ -5,6 +5,7 @@ Se ejecuta después de scripts/applyPatches.sh, desde la raíz del repo. Hace tr
   1. work/build.gradle: las dependencias de Arc salen de com.github.Anuken (no de TinyLake/JitPack).
   2. work/settings.gradle: incluye Arc como includeBuild("../Arc"), así las dependencias se
      sustituyen por los proyectos de Arc en el mismo build.
+  0. Arc/build.gradle: LWJGL 3.4.2 publicado (antes lo fijaba el parche de Arc 0009).
   3. work/tools/build.gradle: el buildscript de tools (que necesita arc.packer) usa los jars
      que se compilan en Arc, porque el buildscript no admite includeBuild.
 
@@ -30,6 +31,12 @@ def edit(path: Path, pairs):
     path.write_text(s, encoding="utf-8")
     print(f"[prepareArc] editado: {path}")
 
+
+# Equivalente al antiguo parche de Arc 0009: LWJGL 3.4.2 publicado, no el SNAPSHOT
+# (el SNAPSHOT ya no está en los repos y rompe la resolución del backend SDL3).
+edit(ROOT / "Arc" / "build.gradle", [
+    ('versions.lwjgl = "3.4.2-SNAPSHOT"', 'versions.lwjgl = "3.4.2"'),
+])
 
 edit(WORK / "build.gradle", [
     (
