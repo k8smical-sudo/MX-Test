@@ -50,6 +50,11 @@ jobs:
           git submodule update --init --depth=10
           ./scripts/applyPatches.sh
 
+      - name: Preparar Arc upstream (compuesto)
+        run: |
+          (cd Arc && ./gradlew --no-daemon :arc-core:jar :extensions:packer:jar)
+          python3 scripts/prepareArc.py
+
       - name: Build desktop distribution
         working-directory: work
         run: ./gradlew --parallel desktop:dist
