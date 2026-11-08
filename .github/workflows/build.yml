@@ -37,7 +37,7 @@ jobs:
         run: |
           git config --global user.email "ci@noreply.example.com"
           git config --global user.name "github_actions"
-          echo "RELEASE_TAG=prerelease-$(date +'%Y.%m.%d').B${GITHUB_RUN_NUMBER}" | tee -a $GITHUB_ENV
+          echo "RELEASE_TAG=v$(date +'%Y.%m.%d').B${GITHUB_RUN_NUMBER}" | tee -a $GITHUB_ENV
           echo "RELEASE_VERSION=$(date +'%Y.%m.%d').B${GITHUB_RUN_NUMBER}" | tee -a $GITHUB_ENV
           
           if [ -n "$KEYSTORE_BASE64" ]; then
@@ -86,11 +86,7 @@ jobs:
           name: ${{ env.RELEASE_VERSION }}
           target_commitish: ${{github.sha}}
           files: artifacts/*
-          prerelease: true
-      - uses: oven-sh/setup-bun@v1
-      - name: clearOldAssets
-        run: bun run .github/actions/clearOldAssets.ts
-        env:
-          TOKEN: ${{secrets.GITHUB_TOKEN}}
+          prerelease: false
+          make_latest: true
           REPOSITORY: ${{ github.repository }}
           TAG: ${{ env.RELEASE_TAG }}
