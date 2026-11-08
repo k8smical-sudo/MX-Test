@@ -28,7 +28,6 @@ public class Hooks implements ApplicationListener{
             Log.warn(VarsX.bundle.javaWarnLog(OS.javaVersion));
             Events.on(ClientLoadEvent.class, (e) -> ui.showInfo(VarsX.bundle.javaWarnDialog(OS.javaVersion)));
         }
-        Http.onRequest = GithubAcceleration::onRequest;
     }
 
     /** invoke after loading, just before `Mod::init` */
