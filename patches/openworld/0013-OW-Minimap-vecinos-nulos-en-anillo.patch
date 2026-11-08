@@ -1,3 +1,12 @@
+From 93e659627546e47a705c9f8ede657efcc619c476 Mon Sep 17 00:00:00 2001
+From: OpenWorld <OpenWorld@example.com>
+Date: Sun, 8 Nov 2026 00:09:10 +0000
+Subject: [PATCH] OW(Minimap): vecinos nulos del anillo
+
+---
+ core/src/mindustry/graphics/MinimapRenderer.java | 12 ++++++++----
+ 1 file changed, 8 insertions(+), 4 deletions(-)
+
 diff --git a/core/src/mindustry/graphics/MinimapRenderer.java b/core/src/mindustry/graphics/MinimapRenderer.java
 index c87184c..54dc559 100644
 --- a/core/src/mindustry/graphics/MinimapRenderer.java
@@ -43,3 +52,6 @@ index c87184c..54dc559 100644
              color.mul(0.84f, 0.84f, 0.9f, 1f);
          }
  
+-- 
+2.43.0
+
