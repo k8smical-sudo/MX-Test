@@ -59,6 +59,16 @@ function git_am() {
     local status=$?
     set -e
 
+    # DIAG: si git am se detuvo, mostrar el parche actual y los archivos en conflicto
+    if is_rebase_in_progress; then
+        echo "===== DIAG git am: parche que falla ====="
+        git am --show-current-patch=diff 2>/dev/null | grep -E "^(Subject|diff --git|index |@@)" | head -40 || true
+        echo "===== DIAG git am: estado (U = conflicto) ====="
+        git status --short | head -60 || true
+        echo "===== DIAG git am: archivos en conflicto ====="
+        git diff --name-only --diff-filter=U || true
+        echo "===== DIAG fin ====="
+    fi
     # 只要还处于 git am 进行中（rebase-apply目录存在），就进入循环
     while is_rebase_in_progress; do
         echo -e "\n${RED}!!! CONFLICT DETECTED !!!${NC}"
