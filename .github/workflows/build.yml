@@ -56,6 +56,15 @@ jobs:
         run: |
           git submodule update --init --depth=10
           ./scripts/applyPatches.sh
+          echo "===== DIAG build.gradle (buildscript y dependencias) ====="
+          grep -n "buildscript\|classpath\|arcModule\|localArc\|TinyLake\|mavenLocal\|includeBuild" work/build.gradle || true
+          echo "===== DIAG build.gradle (primeras 45 lineas) ====="
+          sed -n 1,45p work/build.gradle || true
+          echo "===== DIAG settings.gradle ====="
+          cat work/settings.gradle || true
+          echo "===== DIAG Arc ====="
+          ls Arc | head -20 || true
+          head -40 Arc/settings.gradle 2>/dev/null || true
           cd work
           gradle -Pbuildversion=${RELEASE_VERSION} --parallel \
             desktop:dist desktop:distSdl3 server:dist core:genLoaderModAll android:assembleRelease 
