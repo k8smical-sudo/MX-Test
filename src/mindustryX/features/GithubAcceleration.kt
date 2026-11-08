@@ -1,6 +1,5 @@
 package mindustryX.features
 
-import arc.files.Fi
 import arc.func.Cons
 import arc.func.ConsT
 import arc.scene.ui.CheckBox
@@ -15,10 +14,6 @@ import mindustryX.features.SettingsV2.ListData
 import mindustryX.features.SettingsV2.SliderPref
 import mindustryX.features.SettingsV2.UIBuilder
 import java.net.URL
-import java.security.MessageDigest
-
-private const val bypassHeader = "X-MDTX-GH-Bypass"
-private const val maxCacheBytes = 2 * 1024 * 1024
 
 data class ProxyConfig(
     var url: String = "https://",
@@ -79,7 +74,6 @@ class ProxyListData(name: String, default: List<ProxyConfig>) : ListData<ProxyCo
                         set(get() + ProxyConfig())
                     }.colspan(5).fillX().row()
                     add("[yellow]修改后点击保存图标生效").colspan(5).center().padTop(-4f).row()
-                    button("清空缓存", Icon.trash) { GithubAcceleration.clearCache() }.colspan(5).fillX()
                 }
             }.also {
                 collapser(it) { shown }.growX().row()
@@ -90,8 +84,6 @@ class ProxyListData(name: String, default: List<ProxyConfig>) : ListData<ProxyCo
 
 object GithubAcceleration {
     val enabled = CheckPref("githubAcceleration.enabled", true).apply { addFallbackName("githubMirror") }
-    val enableCache = CheckPref("githubAcceleration.cache", true)
-    val cacheExpireMinutes = SliderPref("githubAcceleration.cacheExpire", 120, 10, 1440, 10) { "$it min" }
     val maxRetries = SliderPref("githubAcceleration.maxRetries", 3, 1, 8) { it.toString() }
 
     val proxyList = ProxyListData(
@@ -100,52 +92,6 @@ object GithubAcceleration {
             ProxyConfig("https://ghproxy.com", assetEnabled = true, apiEnabled = false)
         )
     )
-
-    private val cacheRoot: Fi by lazy {
-        Vars.dataDirectory.child("cache").child("gh-acceleration").also { it.mkdirs() }
-    }
-
-    private val canSynthesize: Boolean by lazy {
-        runCatching { Http.HttpResponse::class.java.getMethod("ofBytes", Int::class.javaPrimitiveType, ByteArray::class.java) }.isSuccess
-    }
-
-    private val cacheEnabled get() = enableCache.get() && canSynthesize
-
-    @JvmStatic
-    fun clearCache() {
-        runCatching { cacheRoot.list().forEach { it.delete() } }
-        Log.info("GitHub acceleration cache cleared")
-    }
-
-    private fun isGithubUrl(url: String): Boolean = runCatching {
-        val host = URL(url).host.lowercase()
-        host == "github.com" || host.endsWith(".github.com")
-                || host == "githubusercontent.com" || host.endsWith(".githubusercontent.com")
-    }.getOrDefault(false)
-
-    /** Hook：只接管 GitHub 的 GET。fetch 同步执行，响应仍在连接关闭前交付。 */
-    @JvmStatic
-    fun onRequest(req: Http.HttpRequest): Boolean {
-        if (!enabled.get()) return false
-        if (req.method != Http.HttpMethod.GET) return false
-        if (req.headers.containsKey(bypassHeader)) return false
-        val original = req.url ?: return false
-        if (!isGithubUrl(original)) return false
-        val callback = req.success ?: return false
-        val headers = req.headers
-        return try {
-            fetch(original, { inner ->
-                inner.timeout(req.timeout)
-                headers.each { k, v -> inner.header(k, v) }
-            }) {
-                callback.get(it)
-            }
-            true
-        } catch (e: Throwable) {
-            req.errorHandler.get(e)
-            true
-        }
-    }
 
     /** MindustryX 自己的 GitHub GET 入口，loader fallback 下也走同一套 pipeline。 */
     @JvmStatic
@@ -175,13 +121,6 @@ object GithubAcceleration {
      *  [success] 不允许抛异常，调用方需自行 try/catch。 */
     @Throws(Exception::class)
     private fun fetch(original: String, configure: Cons<Http.HttpRequest>?, success: (Http.HttpResponse) -> Unit) {
-        if (cacheEnabled && !isApiUrl(original)) {
-            readCache(original)?.let { bytes ->
-                success(Http.HttpResponse.ofBytes(200, bytes))
-                return
-            }
-        }
-
         // 镜像按列表顺序尝试，源站(github.com)始终作为最后兜底
         val urls = buildList {
             proxyList.takeIf { enabled.get() }?.run {
@@ -198,22 +137,15 @@ object GithubAcceleration {
 
         var last: Throwable? = null
         for (url in urls) {
-            val req = Http.get(url).header(bypassHeader, "1")
+            val req = Http.get(url)
             configure?.get(req)
 
             var delivered = false
             req.error { e -> last = e }
             req.block { res ->
-                val out = if (cacheEnabled && !isApiUrl(original) && res.contentLength in 1..maxCacheBytes.toLong()) {
-                    val bytes = res.result
-                    writeCache(original, bytes)
-                    Http.HttpResponse.ofBytes(200, bytes)
-                } else {
-                    res
-                }
                 delivered = true
                 last = null
-                success(out)
+                success(res)
             }
             if (delivered) {
                 throw last ?: return
@@ -226,24 +158,4 @@ object GithubAcceleration {
         URL(url).host.equals("api.github.com", ignoreCase = true)
     }.getOrDefault(false)
 
-    private fun cacheFile(url: String): Fi {
-        val digest = MessageDigest.getInstance("SHA-1").digest(url.toByteArray(Charsets.UTF_8))
-        return cacheRoot.child(digest.joinToString("") { "%02x".format(it) } + ".bin")
-    }
-
-    private fun readCache(url: String): ByteArray? {
-        val file = cacheFile(url)
-        if (!file.exists()) return null
-        if (System.currentTimeMillis() > file.lastModified() + cacheExpireMinutes.get() * 60_000L) {
-            file.delete()
-            return null
-        }
-        return runCatching { file.readBytes() }.getOrNull()
-    }
-
-    private fun writeCache(url: String, data: ByteArray) {
-        if (data.isEmpty() || data.size > maxCacheBytes) return
-        runCatching { cacheFile(url).writeBytes(data) }
-            .onFailure { Log.warn("GitHub cache write failed: @", it.toString()) }
-    }
 }
